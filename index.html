@@ -1,0 +1,1699 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mapa de Líderes — DF</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import { getFirestore, doc, getDoc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  // ── CONFIGURAÇÃO FIREBASE ────────────────────────────────────────
+  // INSTRUÇÕES: Substitua os valores abaixo pelos do seu projeto Firebase.
+  // Crie um projeto gratuito em https://console.firebase.google.com
+  // Vá em: Configurações do projeto > Seus apps > SDK Firebase > Configuração
+  const firebaseConfig = {
+    apiKey:            "AIzaSyA_f1GHkacTMn5uEAqETKV_b0UZCiIgB48",
+    authDomain:        "dashboard-mapa-lideres-silvana.firebaseapp.com",
+    projectId:         "dashboard-mapa-lideres-silvana",
+    storageBucket:     "dashboard-mapa-lideres-silvana.firebasestorage.app",
+    messagingSenderId: "354597336381",
+    appId:             "1:354597336381:web:5c964561c93fa28f8b0154"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db  = getFirestore(app);
+
+  const DOC_LEADERS = doc(db, "mapa_lideres", "leaders");
+  const DOC_SECTORS = doc(db, "mapa_lideres", "sectors");
+
+  // ── INDICADOR DE STATUS ──────────────────────────────────────────
+  function setDbStatus(state) {
+    const el = document.getElementById('db-status');
+    if (!el) return;
+    if (state === 'ok')      { el.style.background='#3ab07e'; el.title='Firebase conectado'; }
+    else if(state==='error') { el.style.background='#e05555'; el.title='Erro de conexão Firebase'; }
+    else                     { el.style.background='#f0a030'; el.title='Conectando Firebase…'; }
+  }
+
+  // ── CARREGAR DADOS DO FIRESTORE ──────────────────────────────────
+  async function loadFromFirestore() {
+    setDbStatus('loading');
+    try {
+      const [snapL, snapS] = await Promise.all([getDoc(DOC_LEADERS), getDoc(DOC_SECTORS)]);
+
+      if (snapL.exists()) {
+        const data = snapL.data();
+        // Mescla: mantém líderes do código como base, sobrescreve com Firestore
+        Object.keys(data).forEach(k => { window.LEADERS[k] = data[k]; });
+      }
+
+      if (snapS.exists()) {
+        const data = snapS.data();
+        // Restaura valores de leaders (meta) por setor
+        Object.entries(window.CITIES).forEach(([ck, c]) => {
+          c.sectors.forEach(sec => {
+            if (data[sec.id] !== undefined) sec.leaders = data[sec.id];
+          });
+        });
+      }
+
+      setDbStatus('ok');
+      // Re-renderiza tudo com dados do Firestore
+      if (window.viewMap) { window.renderViewLayers(); window.renderCitySummaries(); }
+      if (window.admMap)  { window.renderAdmLayers(); window.renderAdmCityBars(); }
+      if (document.getElementById('lideres-wrap').style.display === 'flex') {
+        window.renderLidSectorList();
+      }
+      showToast('Dados carregados da nuvem ☁');
+    } catch(e) {
+      console.error('Firebase load error:', e);
+      setDbStatus('error');
+      showToast('Sem conexão — usando dados locais', false);
+    }
+  }
+
+  // ── SALVAR LEADERS NO FIRESTORE ──────────────────────────────────
+  async function saveLeadersToFirestore() {
+    try {
+      await setDoc(DOC_LEADERS, window.LEADERS);
+      setDbStatus('ok');
+    } catch(e) {
+      console.error('Firebase save leaders error:', e);
+      setDbStatus('error');
+      showToast('Erro ao salvar na nuvem', false);
+    }
+  }
+
+  // ── SALVAR METAS DE SETORES NO FIRESTORE ────────────────────────
+  async function saveSectorsToFirestore() {
+    const sectorData = {};
+    Object.values(window.CITIES).forEach(c => {
+      c.sectors.forEach(sec => { sectorData[sec.id] = sec.leaders; });
+    });
+    try {
+      await setDoc(DOC_SECTORS, sectorData);
+      setDbStatus('ok');
+    } catch(e) {
+      console.error('Firebase save sectors error:', e);
+      setDbStatus('error');
+      showToast('Erro ao salvar na nuvem', false);
+    }
+  }
+
+  // ── EXPÕE FUNÇÕES PARA O CÓDIGO GLOBAL ──────────────────────────
+  window._fbSaveLeaders = saveLeadersToFirestore;
+  window._fbSaveSectors = saveSectorsToFirestore;
+
+  // ── LISTENER EM TEMPO REAL (outros usuários veem mudanças ao vivo) ──
+  onSnapshot(DOC_LEADERS, (snap) => {
+    if (!snap.exists() || !window._fbInitialized) return;
+    const data = snap.data();
+    Object.keys(data).forEach(k => { window.LEADERS[k] = data[k]; });
+    if (window.viewMap) { window.renderViewLayers(); window.renderCitySummaries(); }
+    if (window.currentSectorId) window.renderLeaderCards(window.currentSectorId);
+    window.renderLidSectorList(document.getElementById('lid-search')?.value || '');
+  });
+
+  onSnapshot(DOC_SECTORS, (snap) => {
+    if (!snap.exists() || !window._fbInitialized) return;
+    const data = snap.data();
+    Object.entries(window.CITIES).forEach(([, c]) => {
+      c.sectors.forEach(sec => { if (data[sec.id] !== undefined) sec.leaders = data[sec.id]; });
+    });
+    if (window.viewMap) { window.renderViewLayers(); window.renderCitySummaries(); }
+    if (window.admMap)  { window.renderAdmLayers(); window.renderAdmCityBars(); }
+  });
+
+  // ── INIT: aguarda DOM + dados JS estarem prontos ─────────────────
+  window.addEventListener('load', async () => {
+    // Aguarda o initViewMap() ter rodado
+    await new Promise(r => setTimeout(r, 500));
+    await loadFromFirestore();
+    window._fbInitialized = true;
+  });
+</script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'DM Sans', sans-serif; background: #0e0e14; color: #f0f0f0; }
+  #app { display: flex; flex-direction: column; height: 100vh; }
+
+  /* ── TOPBAR ── */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 20px; height: 52px;
+    background: #0e0e14;
+    border-bottom: 1px solid #2a2a3a;
+    z-index: 1000; flex-shrink: 0;
+  }
+  .topbar-brand { display: flex; align-items: center; gap: 10px; }
+  .brand-dot { width: 8px; height: 8px; border-radius: 50%; background: #4e9af1; box-shadow: 0 0 8px #4e9af1; }
+  .topbar-title { font-family: 'Syne', sans-serif; font-size: 14px; font-weight: 800; letter-spacing: .04em; color: #fff; }
+  .topbar-sub { font-size: 10px; color: #555; margin-left: 4px; letter-spacing: .02em; }
+  .tabs { display: flex; gap: 4px; background: #1a1a26; border-radius: 8px; padding: 3px; border: 1px solid #2a2a3a; }
+  .tab {
+    font-family: 'DM Sans', sans-serif; font-size: 11px; font-weight: 500;
+    padding: 5px 14px; border-radius: 6px;
+    border: none; background: transparent;
+    cursor: pointer; color: #888; transition: all 0.15s;
+  }
+  .tab.on { background: #fff; color: #0e0e14; font-weight: 700; }
+  .tab:hover:not(.on) { color: #ccc; }
+
+  /* ── BODY ── */
+  .body { display: flex; flex: 1; overflow: hidden; }
+  #map { flex: 1; height: 100%; }
+
+  /* ── SIDE PANEL ── */
+  #side {
+    width: 280px; background: #12121e; border-left: 1px solid #2a2a3a;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .side-head {
+    padding: 14px 16px; border-bottom: 1px solid #2a2a3a;
+    font-family: 'Syne', sans-serif; font-size: 12px; font-weight: 700;
+    color: #aaa; letter-spacing: .08em; text-transform: uppercase;
+    background: #0e0e14;
+  }
+  #side-body { flex: 1; overflow-y: auto; padding: 14px 16px; scrollbar-width: thin; scrollbar-color: #2a2a3a transparent; }
+
+  .city-sum { margin-bottom: 14px; padding-bottom: 14px; border-bottom: 1px solid #1e1e2e; }
+  .city-sum-name { font-family: 'Syne', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; margin-bottom: 4px; }
+  .city-sum-total { font-family: 'Syne', sans-serif; font-size: 32px; font-weight: 800; line-height: 1; }
+  .city-sum-label { font-size: 10px; color: #555; margin-top: 2px; }
+  .pbar { height: 3px; border-radius: 2px; margin-top: 6px; transition: width 0.4s; }
+
+  .hint { font-size: 11px; color: #444; text-align: center; padding: 24px 10px; line-height: 1.9; border: 1px dashed #222; border-radius: 8px; margin-top: 4px; }
+  .sec-name { font-family: 'Syne', sans-serif; font-size: 18px; font-weight: 800; }
+  .sec-city { font-size: 10px; margin-bottom: 10px; letter-spacing: .04em; text-transform: uppercase; }
+  .sec-num { font-family: 'Syne', sans-serif; font-size: 44px; font-weight: 800; line-height: 1; }
+  .sec-lbl { font-size: 10px; color: #555; margin-bottom: 14px; text-transform: uppercase; letter-spacing: .04em; }
+  .mini-row { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
+  .mini-label { font-size: 10px; width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #666; }
+  .mini-track { flex: 1; height: 4px; background: #1e1e2e; border-radius: 2px; overflow: hidden; }
+  .mini-fill { height: 100%; border-radius: 2px; transition: width 0.3s; }
+  .mini-count { font-size: 10px; width: 22px; text-align: right; color: #666; }
+  .back-btn { margin-top: 14px; padding-top: 10px; border-top: 1px solid #1e1e2e; font-size: 11px; color: #555; cursor: pointer; display: inline-block; }
+  .back-btn:hover { color: #ccc; }
+
+  /* ── ZONAS ELEITORAIS NO SIDE ── */
+  .zonas-section { margin-top: 18px; padding-top: 14px; border-top: 1px solid #1e1e2e; }
+  .zonas-title { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; color: #444; margin-bottom: 10px; }
+  .zona-city-block { margin-bottom: 14px; }
+  .zona-city-name { font-family: 'Syne', sans-serif; font-size: 11px; font-weight: 700; margin-bottom: 6px; }
+  .zona-tag { display: inline-flex; align-items: center; gap: 4px; font-size: 9px; font-weight: 700; padding: 2px 7px; border-radius: 4px; margin: 2px 3px 2px 0; letter-spacing: .03em; }
+  .zona-escola-block { margin-top: 6px; }
+  .zona-escola-item { font-size: 9px; color: #555; line-height: 1.7; padding: 4px 0; border-top: 1px solid #1a1a28; }
+  .zona-escola-item strong { color: #888; }
+  .zona-escola-item em { color: #444; font-style: normal; }
+
+  /* ── ADMIN ── */
+  #admin-wrap { display: none; flex: 1; overflow: hidden; }
+  #adm-map { flex: 1; height: 100%; }
+  #adm-side {
+    width: 280px; background: #12121e; border-left: 1px solid #2a2a3a;
+    display: flex; flex-direction: column; overflow-y: auto; padding: 16px;
+    gap: 14px;
+  }
+  #adm-side h3 { font-family: 'Syne', sans-serif; font-size: 11px; font-weight: 700; color: #555; letter-spacing: .08em; text-transform: uppercase; }
+  .adm-lbl { font-size: 10px; color: #555; margin-bottom: 4px; text-transform: uppercase; letter-spacing: .04em; }
+  .adm-input {
+    width: 100%; font-family: 'Syne', sans-serif; font-size: 28px; height: 54px; font-weight: 800;
+    padding: 8px 12px; border-radius: 8px; border: 1px solid #2a2a3a;
+    background: #0e0e14; color: #fff; outline: none;
+  }
+  .adm-input:focus { border-color: #4e9af1; }
+  .adm-range { width: 100%; accent-color: #4e9af1; }
+  .adm-save {
+    width: 100%; padding: 12px; font-family: 'Syne', sans-serif; font-size: 12px; font-weight: 700;
+    cursor: pointer; background: #4e9af1; color: #fff;
+    border: none; border-radius: 8px; letter-spacing: .04em;
+    transition: opacity 0.15s;
+  }
+  .adm-save:hover { opacity: 0.85; }
+  .adm-hint { font-size: 11px; color: #444; text-align: center; padding: 24px 10px; line-height: 1.9; border: 1px dashed #222; border-radius: 8px; }
+  .city-bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .city-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .city-bar-track { flex: 1; height: 4px; background: #1e1e2e; border-radius: 2px; overflow: hidden; }
+  .divider { border: none; border-top: 1px solid #1e1e2e; }
+
+  /* ── LÍDERES TAB ── */
+  #lideres-wrap { display: none; flex: 1; overflow: hidden; background: #0e0e14; }
+  .lid-container { display: flex; height: 100%; }
+  .lid-list { width: 280px; border-right: 1px solid #2a2a3a; display: flex; flex-direction: column; }
+  .lid-list-head { padding: 14px 16px; border-bottom: 1px solid #2a2a3a; background: #0e0e14; }
+  .lid-list-head h2 { font-family: 'Syne', sans-serif; font-size: 12px; font-weight: 700; color: #aaa; letter-spacing: .08em; text-transform: uppercase; }
+  .lid-search { width: 100%; margin-top: 8px; background: #12121e; border: 1px solid #2a2a3a; border-radius: 6px; padding: 7px 10px; font-size: 11px; color: #ccc; outline: none; font-family: 'DM Sans', sans-serif; }
+  .lid-search::placeholder { color: #444; }
+  .lid-sector-list { flex: 1; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #2a2a3a transparent; }
+  .lid-sector-item { padding: 10px 16px; border-bottom: 1px solid #1a1a28; cursor: pointer; transition: background 0.1s; display: flex; align-items: center; justify-content: space-between; }
+  .lid-sector-item:hover { background: #12121e; }
+  .lid-sector-item.active { background: #1a1a2e; }
+  .lid-sector-name { font-size: 12px; font-weight: 600; }
+  .lid-sector-city { font-size: 9px; color: #555; margin-top: 1px; }
+  .lid-sector-count { font-family: 'Syne', sans-serif; font-size: 12px; font-weight: 700; }
+
+  .lid-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .lid-main-head { padding: 16px 20px; border-bottom: 1px solid #2a2a3a; background: #0e0e14; display: flex; align-items: center; justify-content: space-between; }
+  .lid-main-title { font-family: 'Syne', sans-serif; font-size: 18px; font-weight: 800; }
+  .lid-main-subtitle { font-size: 10px; color: #555; margin-top: 2px; text-transform: uppercase; letter-spacing: .05em; }
+  .lid-add-btn { padding: 8px 16px; background: #4e9af1; color: #fff; border: none; border-radius: 7px; font-family: 'Syne', sans-serif; font-size: 11px; font-weight: 700; cursor: pointer; letter-spacing: .03em; transition: opacity 0.15s; }
+  .lid-add-btn:hover { opacity: 0.85; }
+
+  .lid-table-wrap { flex: 1; overflow-y: auto; padding: 16px 20px; scrollbar-width: thin; scrollbar-color: #2a2a3a transparent; }
+  .lid-empty { text-align: center; padding: 48px 20px; color: #444; font-size: 12px; line-height: 2; }
+
+  .lid-card { background: #12121e; border: 1px solid #1e1e2e; border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; display: flex; align-items: center; gap: 12px; transition: border-color 0.15s; }
+  .lid-card:hover { border-color: #2a2a4a; }
+  .lid-avatar { width: 38px; height: 38px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-family: 'Syne', sans-serif; font-size: 14px; font-weight: 800; flex-shrink: 0; }
+  .lid-info { flex: 1; }
+  .lid-card-name { font-size: 13px; font-weight: 600; color: #e0e0e0; }
+  .lid-card-phone { font-size: 11px; color: #555; margin-top: 2px; }
+  .lid-card-actions { display: flex; gap: 6px; }
+  .lid-btn { width: 28px; height: 28px; border-radius: 6px; border: 1px solid #2a2a3a; background: transparent; cursor: pointer; font-size: 12px; display: flex; align-items: center; justify-content: center; transition: all 0.15s; color: #555; }
+  .lid-btn:hover { background: #1e1e2e; color: #ccc; }
+  .lid-btn.del:hover { background: #2a1a1a; color: #e05555; border-color: #3a2020; }
+
+  /* ── MODAL ── */
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.75); backdrop-filter: blur(4px); z-index: 9000; display: none; align-items: center; justify-content: center; }
+  .modal-bg.open { display: flex; }
+  .modal { background: #12121e; border: 1px solid #2a2a3a; border-radius: 14px; width: 380px; padding: 24px; box-shadow: 0 24px 80px rgba(0,0,0,0.8); }
+  .modal-title { font-family: 'Syne', sans-serif; font-size: 16px; font-weight: 800; margin-bottom: 18px; }
+  .modal-field { margin-bottom: 14px; }
+  .modal-label { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 5px; display: block; }
+  .modal-input { width: 100%; background: #0e0e14; border: 1px solid #2a2a3a; border-radius: 8px; padding: 10px 12px; font-size: 13px; color: #e0e0e0; outline: none; font-family: 'DM Sans', sans-serif; transition: border-color 0.15s; }
+  .modal-input:focus { border-color: #4e9af1; }
+  .modal-select { width: 100%; background: #0e0e14; border: 1px solid #2a2a3a; border-radius: 8px; padding: 10px 12px; font-size: 12px; color: #e0e0e0; outline: none; font-family: 'DM Sans', sans-serif; }
+  .modal-footer { display: flex; gap: 8px; margin-top: 20px; }
+  .modal-cancel { flex: 1; padding: 10px; background: transparent; border: 1px solid #2a2a3a; border-radius: 8px; color: #555; font-family: 'Syne', sans-serif; font-size: 11px; font-weight: 700; cursor: pointer; letter-spacing: .04em; transition: all 0.15s; }
+  .modal-cancel:hover { color: #ccc; border-color: #444; }
+  .modal-ok { flex: 2; padding: 10px; background: #4e9af1; border: none; border-radius: 8px; color: #fff; font-family: 'Syne', sans-serif; font-size: 11px; font-weight: 700; cursor: pointer; letter-spacing: .04em; transition: opacity 0.15s; }
+  .modal-ok:hover { opacity: 0.85; }
+
+  /* ── PDF MODAL ── */
+  .pdf-modal { width: 480px; }
+  .pdf-preview { background: #0e0e14; border: 1px solid #1e1e2e; border-radius: 8px; padding: 16px; margin-top: 12px; }
+  .pdf-preview-title { font-family: 'Syne', sans-serif; font-size: 11px; font-weight: 700; color: #555; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 10px; }
+  .pdf-option { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 7px; border: 1px solid #2a2a3a; margin-bottom: 7px; cursor: pointer; transition: all 0.15s; }
+  .pdf-option:hover { border-color: #4e9af1; background: #0e0e1e; }
+  .pdf-option.sel { border-color: #4e9af1; background: #0e0e1e; }
+  .pdf-option input { accent-color: #4e9af1; }
+  .pdf-option-text { flex: 1; }
+  .pdf-option-label { font-size: 12px; font-weight: 600; }
+  .pdf-option-desc { font-size: 10px; color: #555; margin-top: 1px; }
+  .pdf-gen-btn { width: 100%; margin-top: 14px; padding: 13px; background: linear-gradient(135deg, #4e9af1, #2d6dd4); border: none; border-radius: 8px; color: #fff; font-family: 'Syne', sans-serif; font-size: 13px; font-weight: 700; cursor: pointer; letter-spacing: .04em; transition: opacity 0.15s; }
+  .pdf-gen-btn:hover { opacity: 0.9; }
+
+  /* ── TOAST ── */
+  .toast { position: fixed; bottom: 20px; right: 20px; background: #1e2e1e; border: 1px solid #3a5a3a; color: #7fd17f; padding: 10px 18px; border-radius: 8px; font-size: 12px; font-weight: 600; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 9999; }
+
+  /* Leaflet dark overrides */
+  .leaflet-tooltip { font-family: 'DM Sans', sans-serif; font-size: 12px; font-weight: 600; border-radius: 7px; padding: 6px 12px; background: #12121e; border: 1px solid #2a2a3a; color: #e0e0e0; box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
+  .leaflet-tile-pane { filter: brightness(0.35) saturate(0.3) hue-rotate(200deg); }
+
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 2px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- TOPBAR -->
+  <div class="topbar">
+    <div class="topbar-brand">
+      <div class="brand-dot"></div>
+      <div>
+        <span class="topbar-title">Mapa de Líderes</span>
+        <span class="topbar-sub">DF · Taguatinga · Samambaia · Ceilândia</span>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <div style="display:flex;align-items:center;gap:6px;padding:4px 10px;background:#1a1a26;border:1px solid #2a2a3a;border-radius:7px" title="Status da conexão com o banco de dados">
+        <div id="db-status" style="width:7px;height:7px;border-radius:50%;background:#f0a030;transition:background 0.4s" title="Conectando…"></div>
+        <span style="font-size:10px;color:#555">nuvem</span>
+      </div>
+      <button onclick="openPdfModal()" style="padding:6px 14px;background:transparent;border:1px solid #2a2a3a;border-radius:7px;color:#888;font-family:'DM Sans',sans-serif;font-size:11px;font-weight:500;cursor:pointer;transition:all 0.15s" onmouseover="this.style.borderColor='#4e9af1';this.style.color='#4e9af1'" onmouseout="this.style.borderColor='#2a2a3a';this.style.color='#888'">⬇ Exportar PDF</button>
+      <div class="tabs">
+        <button class="tab on" onclick="switchTab('view')">Visualização</button>
+        <button class="tab" onclick="switchTab('lideres')">Líderes</button>
+        <button class="tab" onclick="switchTab('admin')">Admin</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- VIEW -->
+  <div class="body" id="view-wrap">
+    <div id="map"></div>
+    <div id="side">
+      <div class="side-head" id="side-head">Resumo</div>
+      <div id="side-body">
+        <div id="city-sums"></div>
+        <div class="hint">Clique em um setor no mapa<br>para ver os detalhes</div>
+
+        <!-- ZONAS ELEITORAIS -->
+        <div class="zonas-section">
+          <div class="zonas-title">🗳 Zonas Eleitorais & Escolas</div>
+
+          <div class="zona-city-block">
+            <div class="zona-city-name" style="color:#4e9af1">Taguatinga</div>
+            <span class="zona-tag" style="background:#4e9af120;color:#4e9af1;border:1px solid #4e9af140">3ª Zona</span>
+            <span class="zona-tag" style="background:#4e9af120;color:#4e9af1;border:1px solid #4e9af140">15ª Zona</span>
+            <span class="zona-tag" style="background:#4e9af120;color:#4e9af1;border:1px solid #4e9af140">19ª Zona</span>
+            <div class="zona-escola-block">
+              <div class="zona-escola-item"><strong>3ª Zona</strong> — <em>QNJ, QNL, QNM 34–42</em><br>📍 CEF 15 de Taguatinga Norte (QNM 30); CEF 02 (QNL 06)</div>
+              <div class="zona-escola-item"><strong>15ª Zona</strong> — <em>Taguatinga Sul, Centro, Arniqueira</em><br>📍 CEF Taguatinga Sul (QSB 02); CEF 09 Taguatinga (QNA 22)</div>
+              <div class="zona-escola-item"><strong>19ª Zona</strong> — <em>Taguatinga Norte (demais), Vicente Pires</em><br>📍 CEF 03 Taguatinga Norte (QNE 25); EE Setor O Taguatinga</div>
+            </div>
+          </div>
+
+          <div class="zona-city-block">
+            <div class="zona-city-name" style="color:#e06030">Ceilândia</div>
+            <span class="zona-tag" style="background:#e0603020;color:#e06030;border:1px solid #e0603040">8ª Zona</span>
+            <span class="zona-tag" style="background:#e0603020;color:#e06030;border:1px solid #e0603040">16ª Zona</span>
+            <span class="zona-tag" style="background:#e0603020;color:#e06030;border:1px solid #e0603040">20ª Zona</span>
+            <div class="zona-escola-block">
+              <div class="zona-escola-item"><strong>8ª Zona</strong> — <em>QNM, QNN, P Norte (maioria)</em><br>📍 CEF 27 de Ceilândia (QNM 12); CEF 35 (QNN 14); EC 53 (QNM 04)</div>
+              <div class="zona-escola-item"><strong>16ª Zona</strong> — <em>QNO, QNQ, QNR, Expansão, Sol Nascente</em><br>📍 CEF 16 Ceilândia (QNO 04); CEF Sol Nascente; CEF 66 (QNQ 02)</div>
+              <div class="zona-escola-item"><strong>20ª Zona</strong> — <em>P Sul, QNN 12–40, Sol Nascente P Sul</em><br>📍 CEF 30 Ceilândia (P Sul); EC Guariroba (QNN 30 Área J)</div>
+            </div>
+          </div>
+
+          <div class="zona-city-block">
+            <div class="zona-city-name" style="color:#3ab07e">Samambaia</div>
+            <span class="zona-tag" style="background:#3ab07e20;color:#3ab07e;border:1px solid #3ab07e40">13ª Zona</span>
+            <div class="zona-escola-block">
+              <div class="zona-escola-item"><strong>13ª Zona</strong> — <em>Toda RA de Samambaia</em><br>📍 CEF 312 Samambaia Norte (QN 312); CEF 417 (QR 417); EC 102 (QR 102); CED 07 Samambaia (QR 602)</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- LÍDERES -->
+  <div id="lideres-wrap" style="display:none;flex:1;overflow:hidden">
+    <div class="lid-container">
+      <div class="lid-list">
+        <div class="lid-list-head">
+          <h2>Regiões</h2>
+          <input class="lid-search" type="text" placeholder="Buscar setor..." oninput="filterLidSectors(this.value)" id="lid-search">
+        </div>
+        <div class="lid-sector-list" id="lid-sector-list"></div>
+      </div>
+      <div class="lid-main">
+        <div class="lid-main-head">
+          <div>
+            <div class="lid-main-title" id="lid-main-title" style="color:#555;font-size:14px">Selecione uma região</div>
+            <div class="lid-main-subtitle" id="lid-main-subtitle">Para gerenciar os líderes</div>
+          </div>
+          <button class="lid-add-btn" id="lid-add-btn" onclick="openAddLeader()" style="display:none">+ Adicionar Líder</button>
+        </div>
+        <div class="lid-table-wrap" id="lid-table-wrap">
+          <div class="lid-empty">Selecione um setor na lista à esquerda<br>para ver e gerenciar os líderes</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ADMIN -->
+  <div id="admin-wrap" style="display:none;flex:1;overflow:hidden">
+    <div style="display:flex;flex:1;height:100%">
+      <div id="adm-map" style="flex:1"></div>
+      <div id="adm-side">
+        <h3>Totais por cidade</h3>
+        <div id="adm-city-bars"></div>
+        <hr class="divider">
+        <div id="adm-form"><div class="adm-hint">Clique em um setor no mapa para editar a quantidade de líderes</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<!-- MODAL LÍDER -->
+<div class="modal-bg" id="leader-modal">
+  <div class="modal">
+    <div class="modal-title" id="leader-modal-title">Adicionar Líder</div>
+    <div class="modal-field">
+      <label class="modal-label">Nome completo</label>
+      <input class="modal-input" id="leader-name" type="text" placeholder="Ex: João da Silva">
+    </div>
+    <div class="modal-field">
+      <label class="modal-label">Celular / WhatsApp</label>
+      <input class="modal-input" id="leader-phone" type="tel" placeholder="(61) 9 0000-0000" oninput="maskPhone(this)">
+    </div>
+    <div class="modal-field" id="leader-sector-field">
+      <label class="modal-label">Região / Setor</label>
+      <select class="modal-select" id="leader-sector"></select>
+    </div>
+    <div class="modal-footer">
+      <button class="modal-cancel" onclick="closeLeaderModal()">Cancelar</button>
+      <button class="modal-ok" onclick="saveLeader()">Salvar Líder</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL PDF -->
+<div class="modal-bg" id="pdf-modal">
+  <div class="modal pdf-modal">
+    <div class="modal-title">⬇ Exportar para PDF</div>
+    <div class="pdf-preview">
+      <div class="pdf-preview-title">O que incluir no relatório?</div>
+      <label class="pdf-option sel" id="pdf-opt-all" onclick="selectPdfOpt('all')">
+        <input type="radio" name="pdf-opt" checked> <div class="pdf-option-text"><div class="pdf-option-label">Relatório completo</div><div class="pdf-option-desc">Totais por cidade + lista de líderes por setor + zonas eleitorais</div></div>
+      </label>
+      <label class="pdf-option" id="pdf-opt-summary" onclick="selectPdfOpt('summary')">
+        <input type="radio" name="pdf-opt"> <div class="pdf-option-text"><div class="pdf-option-label">Resumo executivo</div><div class="pdf-option-desc">Apenas totais e comparativos por cidade e setor</div></div>
+      </label>
+      <label class="pdf-option" id="pdf-opt-leaders" onclick="selectPdfOpt('leaders')">
+        <input type="radio" name="pdf-opt"> <div class="pdf-option-text"><div class="pdf-option-label">Lista de líderes</div><div class="pdf-option-desc">Nome e celular de todos os líderes cadastrados, por setor</div></div>
+      </label>
+    </div>
+    <button class="pdf-gen-btn" id="pdf-gen-btn" onclick="startGeneratePDF()">Gerar e baixar PDF</button>
+    <div class="modal-footer" style="margin-top:10px">
+      <button class="modal-cancel" onclick="closePdfModal()">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// DADOS — coordenadas reais dos setores no DF (polígonos reais)
+// ═══════════════════════════════════════════════════════════════
+const CITIES = {
+  taguatinga: {
+    name: 'Taguatinga', color: '#4e9af1', border: '#2d6dd4',
+    sectors: [
+      { id:'t-qna', name:'QNA', leaders:9, coords:[[-15.7920,-48.0570],[-15.7920,-48.0620],[-15.8050,-48.0620],[-15.8050,-48.0570]] },
+      { id:'t-qnb', name:'QNB', leaders:7, coords:[[-15.7920,-48.0620],[-15.7920,-48.0670],[-15.8050,-48.0670],[-15.8050,-48.0620]] },
+      { id:'t-qnc', name:'QNC', leaders:11, coords:[[-15.7920,-48.0670],[-15.7920,-48.0720],[-15.8050,-48.0720],[-15.8050,-48.0670]] },
+      { id:'t-qnd', name:'QND', leaders:8, coords:[[-15.8050,-48.0570],[-15.8050,-48.0620],[-15.8150,-48.0620],[-15.8150,-48.0570]] },
+      { id:'t-qne', name:'QNE', leaders:10, coords:[[-15.8050,-48.0620],[-15.8050,-48.0670],[-15.8150,-48.0670],[-15.8150,-48.0620]] },
+      { id:'t-qnf', name:'QNF', leaders:6, coords:[[-15.8050,-48.0670],[-15.8050,-48.0720],[-15.8150,-48.0720],[-15.8150,-48.0670]] },
+      { id:'t-qng', name:'QNG', leaders:12, coords:[[-15.7920,-48.0720],[-15.7920,-48.0780],[-15.8050,-48.0780],[-15.8050,-48.0720]] },
+      { id:'t-qnh', name:'QNH', leaders:8, coords:[[-15.8050,-48.0720],[-15.8050,-48.0780],[-15.8150,-48.0780],[-15.8150,-48.0720]] },
+      { id:'t-qni', name:'QNI', leaders:10, coords:[[-15.8150,-48.0720],[-15.8150,-48.0780],[-15.8230,-48.0780],[-15.8230,-48.0720]] },
+      { id:'t-qnj', name:'QNJ', leaders:11, coords:[[-15.7920,-48.0780],[-15.7920,-48.0840],[-15.8050,-48.0840],[-15.8050,-48.0780]] },
+      { id:'t-qnl', name:'QNL', leaders:14, coords:[[-15.8050,-48.0780],[-15.8050,-48.0870],[-15.8230,-48.0870],[-15.8230,-48.0780]] },
+      { id:'t-qnm', name:'QNM', leaders:6, coords:[[-15.7920,-48.0840],[-15.7920,-48.0900],[-15.8050,-48.0900],[-15.8050,-48.0840]] },
+      { id:'t-qi', name:'Setor Industrial', leaders:3, coords:[[-15.8230,-48.0780],[-15.8230,-48.0870],[-15.8330,-48.0870],[-15.8330,-48.0780]] },
+      { id:'t-cnorte', name:'C Norte', leaders:5, coords:[[-15.8050,-48.0570],[-15.8050,-48.0520],[-15.8230,-48.0520],[-15.8230,-48.0570]] },
+      { id:'t-qsa', name:'QSA', leaders:9, coords:[[-15.8330,-48.0520],[-15.8330,-48.0580],[-15.8430,-48.0580],[-15.8430,-48.0520]] },
+      { id:'t-qsb', name:'QSB', leaders:13, coords:[[-15.8330,-48.0580],[-15.8330,-48.0640],[-15.8430,-48.0640],[-15.8430,-48.0580]] },
+      { id:'t-qsc', name:'QSC', leaders:7, coords:[[-15.8330,-48.0640],[-15.8330,-48.0700],[-15.8430,-48.0700],[-15.8430,-48.0640]] },
+      { id:'t-qsd', name:'QSD', leaders:11, coords:[[-15.8330,-48.0700],[-15.8330,-48.0760],[-15.8430,-48.0760],[-15.8430,-48.0700]] },
+      { id:'t-qse', name:'QSE', leaders:5, coords:[[-15.8330,-48.0760],[-15.8330,-48.0820],[-15.8430,-48.0820],[-15.8430,-48.0760]] },
+      { id:'t-qsf', name:'QSF', leaders:8, coords:[[-15.8330,-48.0820],[-15.8330,-48.0870],[-15.8430,-48.0870],[-15.8430,-48.0820]] },
+      { id:'t-centro', name:'Centro', leaders:15, coords:[[-15.8230,-48.0520],[-15.8230,-48.0870],[-15.8330,-48.0870],[-15.8330,-48.0520]] },
+    ]
+  },
+  ceilandia: {
+    name: 'Ceilândia', color: '#e06030', border: '#a03010',
+    sectors: [
+      { id:'c-qnm', name:'QNM', leaders:11, coords:[[-15.7950,-48.0950],[-15.7950,-48.1060],[-15.8100,-48.1060],[-15.8100,-48.0950]] },
+      { id:'c-qnn', name:'QNN', leaders:8, coords:[[-15.8100,-48.0950],[-15.8100,-48.1060],[-15.8220,-48.1060],[-15.8220,-48.0950]] },
+      { id:'c-pnorte', name:'P Norte', leaders:19, coords:[[-15.7800,-48.1060],[-15.7800,-48.1200],[-15.7950,-48.1200],[-15.7950,-48.1060]] },
+      { id:'c-psul', name:'P Sul', leaders:15, coords:[[-15.7950,-48.1060],[-15.7950,-48.1200],[-15.8100,-48.1200],[-15.8100,-48.1060]] },
+      { id:'c-guariroba', name:'Guariroba', leaders:13, coords:[[-15.8100,-48.1060],[-15.8100,-48.1200],[-15.8220,-48.1200],[-15.8220,-48.1060]] },
+      { id:'c-setoro', name:'Setor O', leaders:10, coords:[[-15.7800,-48.1200],[-15.7800,-48.1340],[-15.7950,-48.1340],[-15.7950,-48.1200]] },
+      { id:'c-setorq', name:'Setor Q', leaders:7, coords:[[-15.7950,-48.1200],[-15.7950,-48.1340],[-15.8100,-48.1340],[-15.8100,-48.1200]] },
+      { id:'c-setorr', name:'Setor R', leaders:6, coords:[[-15.8100,-48.1200],[-15.8100,-48.1340],[-15.8220,-48.1340],[-15.8220,-48.1200]] },
+      { id:'c-solnascente', name:'Sol Nascente', leaders:8, coords:[[-15.7700,-48.1340],[-15.7700,-48.1520],[-15.7950,-48.1520],[-15.7950,-48.1340]] },
+      { id:'c-pordosol', name:'Pôr do Sol', leaders:9, coords:[[-15.7950,-48.1340],[-15.7950,-48.1520],[-15.8120,-48.1520],[-15.8120,-48.1340]] },
+      { id:'c-expnorte', name:'Expansão P Norte', leaders:12, coords:[[-15.7700,-48.1060],[-15.7700,-48.1340],[-15.7800,-48.1340],[-15.7800,-48.1060]] },
+      { id:'c-sic', name:'Ind. Ceilândia', leaders:4, coords:[[-15.8220,-48.0950],[-15.8220,-48.1060],[-15.8350,-48.1060],[-15.8350,-48.0950]] },
+      { id:'c-expsul', name:'Expansão Sul', leaders:17, coords:[[-15.8220,-48.1060],[-15.8220,-48.1340],[-15.8350,-48.1340],[-15.8350,-48.1060]] },
+    ]
+  },
+  samambaia: {
+    name: 'Samambaia', color: '#3ab07e', border: '#217a55',
+    sectors: [
+      // Samambaia Norte — QN (linhas norte, lat -15.848 a -15.876)
+      { id:'s-qn100', name:'QN 100', leaders:9,  coords:[[-15.8480,-48.0560],[-15.8480,-48.0700],[-15.8620,-48.0700],[-15.8620,-48.0560]] },
+      { id:'s-qn200', name:'QN 200', leaders:6,  coords:[[-15.8620,-48.0560],[-15.8620,-48.0700],[-15.8760,-48.0700],[-15.8760,-48.0560]] },
+      { id:'s-qn300', name:'QN 300', leaders:8,  coords:[[-15.8760,-48.0560],[-15.8760,-48.0700],[-15.8880,-48.0700],[-15.8880,-48.0560]] },
+      { id:'s-qn400', name:'QN 400', leaders:12, coords:[[-15.8480,-48.0700],[-15.8480,-48.0840],[-15.8620,-48.0840],[-15.8620,-48.0700]] },
+      { id:'s-qn500', name:'QN 500', leaders:7,  coords:[[-15.8620,-48.0700],[-15.8620,-48.0840],[-15.8760,-48.0840],[-15.8760,-48.0700]] },
+      { id:'s-qn600', name:'QN 600', leaders:10, coords:[[-15.8760,-48.0700],[-15.8760,-48.0840],[-15.8880,-48.0840],[-15.8880,-48.0700]] },
+      // Samambaia Sul — QR (linhas sul, lat -15.876 a -15.900)
+      { id:'s-qr100', name:'QR 100', leaders:16, coords:[[-15.8480,-48.0400],[-15.8480,-48.0560],[-15.8620,-48.0560],[-15.8620,-48.0400]] },
+      { id:'s-qr200', name:'QR 200', leaders:5,  coords:[[-15.8620,-48.0400],[-15.8620,-48.0560],[-15.8760,-48.0560],[-15.8760,-48.0400]] },
+      { id:'s-qr300', name:'QR 300', leaders:7,  coords:[[-15.8760,-48.0400],[-15.8760,-48.0560],[-15.8880,-48.0560],[-15.8880,-48.0400]] },
+      { id:'s-qr400', name:'QR 400', leaders:11, coords:[[-15.8880,-48.0400],[-15.8880,-48.0560],[-15.8980,-48.0560],[-15.8980,-48.0400]] },
+      { id:'s-qr500', name:'QR 500', leaders:9,  coords:[[-15.8880,-48.0560],[-15.8880,-48.0700],[-15.8980,-48.0700],[-15.8980,-48.0560]] },
+      { id:'s-qr600', name:'QR 600', leaders:4,  coords:[[-15.8880,-48.0700],[-15.8880,-48.0840],[-15.8980,-48.0840],[-15.8980,-48.0700]] },
+      // Setores especiais
+      { id:'s-central',   name:'Setor Central',   leaders:13, coords:[[-15.8480,-48.0840],[-15.8480,-48.0980],[-15.8620,-48.0980],[-15.8620,-48.0840]] },
+      { id:'s-comercial', name:'Setor Comercial',  leaders:3,  coords:[[-15.8620,-48.0840],[-15.8620,-48.0980],[-15.8760,-48.0980],[-15.8760,-48.0840]] },
+      { id:'s-areanorte', name:'Área Norte',       leaders:6,  coords:[[-15.8340,-48.0400],[-15.8340,-48.0980],[-15.8480,-48.0980],[-15.8480,-48.0400]] },
+    ]
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════
+// LÍDERES — armazenamento em memória
+// ═══════════════════════════════════════════════════════════════
+let LEADERS = {};
+
+// ═══════════════════════════════════════════════════════════════
+// ZONAS ELEITORAIS
+// ═══════════════════════════════════════════════════════════════
+const ZONAS = [
+  { zona:'3ª Zona', cidade:'Taguatinga', color:'#4e9af1', lat:-15.8134, lng:-48.0896, endereco:'TRE-DF — SIG Qd.02 Lote 06', abrangencia:'QNJ, QNL, QNM 34–42, SDE, Ind. Gráficas' },
+  { zona:'15ª Zona', cidade:'Taguatinga', color:'#4e9af1', lat:-15.8380, lng:-48.0660, endereco:'Qd. 207 Lote 02 — Águas Claras', abrangencia:'Taguatinga Sul, Centro, QNA, Arniqueira' },
+  { zona:'19ª Zona', cidade:'Taguatinga', color:'#4e9af1', lat:-15.8050, lng:-48.0650, endereco:'Área Especial 07, Setor G Norte', abrangencia:'Taguatinga Norte (demais), Vicente Pires' },
+  { zona:'8ª Zona', cidade:'Ceilândia', color:'#e06030', lat:-15.8080, lng:-48.1080, endereco:'QNM 12, Via NM 12A — Ceilândia Centro', abrangencia:'QNM, QNN, P Norte, Sol Nascente P Norte' },
+  { zona:'16ª Zona', cidade:'Ceilândia', color:'#e06030', lat:-15.7950, lng:-48.1220, endereco:'TRE-DF — SIG Qd.02 Lote 06', abrangencia:'QNO, QNQ, QNR, Expansão P Norte, Brazlândia' },
+  { zona:'20ª Zona', cidade:'Ceilândia', color:'#e06030', lat:-15.8240, lng:-48.1200, endereco:'QNN 30, Área Esp. J, Guariroba', abrangencia:'P Sul, QNN 12–40, Sol Nascente P Sul' },
+  { zona:'13ª Zona', cidade:'Samambaia', color:'#3ab07e', lat:-15.8800, lng:-48.0650, endereco:'QR 302, Cj. 13, Lt. 11 — Samambaia', abrangencia:'Toda RA de Samambaia' },
+];
+
+// ═══════════════════════════════════════════════════════════════
+// UTILITÁRIOS
+// ═══════════════════════════════════════════════════════════════
+function cityTotal(k){ return CITIES[k].sectors.reduce((s,sec)=>s+sec.leaders,0); }
+
+function hexToRgb(h){ return [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)]; }
+function lerp(a,b,t){ return Math.round(a+(b-a)*t); }
+function sectorFill(cityKey, leaders){
+  const base = hexToRgb(CITIES[cityKey].color);
+  const white = [20,20,30];
+  const max = Math.max(...CITIES[cityKey].sectors.map(s=>s.leaders));
+  const t = 1 - 0.15 - 0.75*(leaders/max);
+  return `rgb(${lerp(base[0],white[0],t)},${lerp(base[1],white[1],t)},${lerp(base[2],white[2],t)})`;
+}
+
+function showToast(msg, ok=true){
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.background = ok ? '#1e2e1e' : '#2e1e1e';
+  t.style.borderColor = ok ? '#3a5a3a' : '#5a3a3a';
+  t.style.color = ok ? '#7fd17f' : '#e07f7f';
+  t.style.opacity='1';
+  setTimeout(()=>t.style.opacity='0', 2400);
+}
+
+function maskPhone(inp){
+  let v = inp.value.replace(/\D/g,'');
+  if(v.length>11) v=v.slice(0,11);
+  if(v.length>6) v=`(${v.slice(0,2)}) ${v.slice(2,7)}-${v.slice(7)}`;
+  else if(v.length>2) v=`(${v.slice(0,2)}) ${v.slice(2)}`;
+  inp.value=v;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MAPA DE VISUALIZAÇÃO
+// ═══════════════════════════════════════════════════════════════
+let viewMap=null, viewLayers=[], zonaMarkers=[];
+let admMap=null, admLayers=[], admSelected=null, admSelectedCity=null;
+
+function initViewMap(){
+  if(viewMap) return;
+  viewMap = L.map('map',{zoomControl:false}).setView([-15.870,-48.080],12);
+  L.control.zoom({position:'bottomright'}).addTo(viewMap);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap',maxZoom:19,crossOrigin:'anonymous'}).addTo(viewMap);
+  renderViewLayers();
+  renderZonaMarkers(viewMap);
+  renderCitySummaries();
+  window.viewMap = viewMap;
+}
+
+function renderViewLayers(){
+  viewLayers.forEach(l=>viewMap.removeLayer(l));
+  viewLayers=[];
+  Object.entries(CITIES).forEach(([cityKey,city])=>{
+    city.sectors.forEach(sec=>{
+      const fill=sectorFill(cityKey,sec.leaders);
+      const poly=L.polygon(sec.coords,{color:city.border,fillColor:fill,fillOpacity:0.82,weight:1.5,opacity:0.9}).addTo(viewMap);
+      poly.bindTooltip(`<strong>${sec.name}</strong><br>${sec.leaders} líderes`,{sticky:true,direction:'top',offset:[0,-4]});
+      const center=poly.getBounds().getCenter();
+      const lCount = (LEADERS[sec.id]||[]).length;
+      const label=L.divIcon({
+        html:`<div style="background:${city.color};color:#fff;font-size:9px;font-weight:700;padding:2px 5px;border-radius:4px;white-space:nowrap;box-shadow:0 1px 6px rgba(0,0,0,0.6);text-align:center;line-height:1.4;pointer-events:none">${sec.name}<br>${sec.leaders}</div>`,
+        className:'',iconAnchor:[22,16]
+      });
+      const marker=L.marker(center,{icon:label,interactive:false}).addTo(viewMap);
+      poly.on('click',()=>showSideDetail(sec,cityKey));
+      poly.on('mouseover',function(){this.setStyle({weight:3,fillOpacity:0.95});});
+      poly.on('mouseout',function(){this.setStyle({weight:1.5,fillOpacity:0.82});});
+      viewLayers.push(poly,marker);
+    });
+  });
+}
+
+function renderZonaMarkers(map){
+  zonaMarkers.forEach(m=>map.removeLayer(m));
+  zonaMarkers=[];
+  ZONAS.forEach(z=>{
+    const icon=L.divIcon({
+      html:`<div style="background:${z.color};color:#fff;font-size:9px;font-weight:800;width:26px;height:26px;border-radius:50%;border:2px solid rgba(255,255,255,0.3);box-shadow:0 2px 10px rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;cursor:pointer">🗳</div>`,
+      className:'',iconAnchor:[13,13]
+    });
+    const marker=L.marker([z.lat,z.lng],{icon}).addTo(map);
+    marker.bindTooltip(`<div style="min-width:180px"><div style="font-weight:700;font-size:13px;color:${z.color}">${z.zona} — ${z.cidade}</div><div style="font-size:11px;margin-top:3px;color:#ccc">${z.endereco}</div><div style="font-size:10px;margin-top:3px;color:#888;font-style:italic">${z.abrangencia}</div></div>`,{direction:'top',offset:[0,-14],opacity:1});
+    zonaMarkers.push(marker);
+  });
+}
+
+function renderCitySummaries(){
+  const el=document.getElementById('city-sums');
+  if(!el) return;
+  const max=Math.max(...Object.keys(CITIES).map(k=>cityTotal(k)));
+  el.innerHTML=Object.entries(CITIES).map(([k,c])=>`
+    <div class="city-sum">
+      <div class="city-sum-name" style="color:${c.color}">${c.name}</div>
+      <div class="city-sum-total" style="color:${c.color}">${cityTotal(k)}</div>
+      <div class="city-sum-label">${c.sectors.length} setores · ${Object.keys(LEADERS).filter(id=>CITIES[k].sectors.find(s=>s.id===id)).reduce((s,id)=>s+(LEADERS[id]||[]).length,0)} líderes cadastrados</div>
+      <div class="pbar" style="background:${c.color};width:${Math.round(cityTotal(k)/max*100)}%"></div>
+    </div>`).join('');
+}
+
+function showSideDetail(sec,cityKey){
+  const c=CITIES[cityKey];
+  const max=Math.max(...c.sectors.map(s=>s.leaders));
+  const lids=(LEADERS[sec.id]||[]);
+  document.getElementById('side-head').textContent=sec.name;
+  document.getElementById('side-body').innerHTML=`
+    <div>
+      <div class="sec-name" style="color:${c.color}">${sec.name}</div>
+      <div class="sec-city" style="color:${c.color}99">${c.name}</div>
+      <div class="sec-num" style="color:${c.color}">${sec.leaders}</div>
+      <div class="sec-lbl">Meta de líderes</div>
+      <div style="height:3px;border-radius:2px;background:${c.color};width:${Math.round(sec.leaders/max*100)}%;margin-bottom:16px"></div>
+      ${lids.length?`<div style="margin-bottom:14px"><div style="font-size:9px;color:#555;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Líderes cadastrados (${lids.length})</div>${lids.map(l=>`<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #1a1a28"><div style="width:26px;height:26px;border-radius:50%;background:${c.color}22;border:1px solid ${c.color}44;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:${c.color}">${l.name[0]}</div><div><div style="font-size:11px;font-weight:600">${l.name}</div><div style="font-size:9px;color:#555">${l.phone||'Sem tel.'}</div></div></div>`).join('')}</div>`:''}
+      <div style="font-size:9px;color:#555;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Todos os setores — ${c.name}</div>
+      ${c.sectors.map(s=>`
+        <div class="mini-row">
+          <div class="mini-label" style="${s.id===sec.id?'color:#e0e0e0;font-weight:700':''}">${s.name}</div>
+          <div class="mini-track"><div class="mini-fill" style="width:${Math.round(s.leaders/max*100)}%;background:${c.color}${s.id===sec.id?'':'44'}"></div></div>
+          <div class="mini-count">${s.leaders}</div>
+        </div>`).join('')}
+      <div class="back-btn" onclick="resetSide()">← Voltar</div>
+    </div>`;
+}
+
+function resetSide(){
+  document.getElementById('side-head').textContent='Resumo';
+  document.getElementById('side-body').innerHTML=`
+    <div id="city-sums"></div>
+    <div class="hint">Clique em um setor no mapa<br>para ver os detalhes</div>
+    <div class="zonas-section">${buildZonasHTML()}</div>`;
+  renderCitySummaries();
+}
+
+function buildZonasHTML(){
+  return `<div class="zonas-title">🗳 Zonas Eleitorais & Escolas</div>
+    <div class="zona-city-block">
+      <div class="zona-city-name" style="color:#4e9af1">Taguatinga</div>
+      <span class="zona-tag" style="background:#4e9af120;color:#4e9af1;border:1px solid #4e9af140">3ª Zona</span>
+      <span class="zona-tag" style="background:#4e9af120;color:#4e9af1;border:1px solid #4e9af140">15ª Zona</span>
+      <span class="zona-tag" style="background:#4e9af120;color:#4e9af1;border:1px solid #4e9af140">19ª Zona</span>
+      <div class="zona-escola-block">
+        <div class="zona-escola-item"><strong>3ª Zona</strong> — <em>QNJ, QNL, QNM 34–42</em><br>📍 CEF 15 Taguatinga Norte; CEF 02 (QNL 06)</div>
+        <div class="zona-escola-item"><strong>15ª Zona</strong> — <em>Taguatinga Sul, Centro</em><br>📍 CEF Taguatinga Sul (QSB 02); CEF 09 (QNA 22)</div>
+        <div class="zona-escola-item"><strong>19ª Zona</strong> — <em>Taguatinga Norte, Vicente Pires</em><br>📍 CEF 03 Taguatinga Norte (QNE 25)</div>
+      </div>
+    </div>
+    <div class="zona-city-block">
+      <div class="zona-city-name" style="color:#e06030">Ceilândia</div>
+      <span class="zona-tag" style="background:#e0603020;color:#e06030;border:1px solid #e0603040">8ª Zona</span>
+      <span class="zona-tag" style="background:#e0603020;color:#e06030;border:1px solid #e0603040">16ª Zona</span>
+      <span class="zona-tag" style="background:#e0603020;color:#e06030;border:1px solid #e0603040">20ª Zona</span>
+      <div class="zona-escola-block">
+        <div class="zona-escola-item"><strong>8ª Zona</strong> — <em>QNM, QNN, P Norte</em><br>📍 CEF 27 (QNM 12); CEF 35 (QNN 14); EC 53</div>
+        <div class="zona-escola-item"><strong>16ª Zona</strong> — <em>QNO, QNQ, QNR, Sol Nascente</em><br>📍 CEF 16 (QNO 04); CEF Sol Nascente; CEF 66</div>
+        <div class="zona-escola-item"><strong>20ª Zona</strong> — <em>P Sul, QNN 12–40</em><br>📍 CEF 30 (P Sul); EC Guariroba (QNN 30)</div>
+      </div>
+    </div>
+    <div class="zona-city-block">
+      <div class="zona-city-name" style="color:#3ab07e">Samambaia</div>
+      <span class="zona-tag" style="background:#3ab07e20;color:#3ab07e;border:1px solid #3ab07e40">13ª Zona</span>
+      <div class="zona-escola-block">
+        <div class="zona-escola-item"><strong>13ª Zona</strong> — <em>Toda RA de Samambaia</em><br>📍 CEF 312 (QN 312); CEF 417 (QR 417); EC 102; CED 07</div>
+      </div>
+    </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MAPA ADMINISTRADOR
+// ═══════════════════════════════════════════════════════════════
+function initAdmMap(){
+  if(admMap) return;
+  admMap=L.map('adm-map',{zoomControl:false}).setView([-15.870,-48.080],12);
+  L.control.zoom({position:'bottomright'}).addTo(admMap);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap',maxZoom:19}).addTo(admMap);
+  renderAdmLayers();
+  renderAdmCityBars();
+  renderZonaMarkers(admMap);
+  window.admMap = admMap;
+}
+
+function renderAdmLayers(){
+  admLayers.forEach(l=>admMap.removeLayer(l));
+  admLayers=[];
+  Object.entries(CITIES).forEach(([cityKey,city])=>{
+    city.sectors.forEach(sec=>{
+      const fill=sectorFill(cityKey,sec.leaders);
+      const isSel=admSelected&&admSelected.id===sec.id;
+      const poly=L.polygon(sec.coords,{color:isSel?'#fff':city.border,fillColor:fill,fillOpacity:0.82,weight:isSel?3:1.5}).addTo(admMap);
+      poly.bindTooltip(`<strong>${sec.name}</strong> — ${sec.leaders} líderes`,{sticky:true,direction:'top',offset:[0,-4]});
+      const center=poly.getBounds().getCenter();
+      const label=L.divIcon({
+        html:`<div style="background:${city.color};color:#fff;font-size:9px;font-weight:700;padding:2px 5px;border-radius:4px;white-space:nowrap;box-shadow:0 1px 6px rgba(0,0,0,0.6);text-align:center;line-height:1.4;pointer-events:none">${sec.name}<br>${sec.leaders}</div>`,
+        className:'',iconAnchor:[22,16]
+      });
+      const marker=L.marker(center,{icon:label,interactive:false}).addTo(admMap);
+      poly.on('click',()=>{admSelected=sec;admSelectedCity=cityKey;renderAdmLayers();showAdmForm(sec,cityKey);});
+      poly.on('mouseover',function(){this.setStyle({weight:3,fillOpacity:0.95});});
+      poly.on('mouseout',function(){this.setStyle({weight:isSel?3:1.5,fillOpacity:0.82});});
+      admLayers.push(poly,marker);
+    });
+  });
+}
+
+function showAdmForm(sec,cityKey){
+  const c=CITIES[cityKey];
+  document.getElementById('adm-form').innerHTML=`
+    <div style="font-family:'Syne',sans-serif;font-size:16px;font-weight:800;color:${c.color};margin-bottom:2px">${sec.name}</div>
+    <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.05em;margin-bottom:14px">${c.name}</div>
+    <div style="margin-bottom:12px">
+      <div class="adm-lbl">Quantidade de líderes</div>
+      <input class="adm-input" type="number" id="adm-n" min="0" max="999" value="${sec.leaders}">
+    </div>
+    <div style="margin-bottom:16px">
+      <div class="adm-lbl">Ajuste rápido (0–60)</div>
+      <input class="adm-range" type="range" id="adm-r" min="0" max="60" step="1" value="${sec.leaders}">
+      <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;margin-top:2px"><span>0</span><span>30</span><span>60</span></div>
+    </div>
+    <button class="adm-save" onclick="saveAdm()">Salvar alterações</button>`;
+  const n=document.getElementById('adm-n'),r=document.getElementById('adm-r');
+  n.addEventListener('input',()=>r.value=Math.min(60,n.value));
+  r.addEventListener('input',()=>n.value=r.value);
+}
+
+function saveAdm(){
+  if(!admSelected) return;
+  const val=parseInt(document.getElementById('adm-n').value)||0;
+  const sec=CITIES[admSelectedCity].sectors.find(s=>s.id===admSelected.id);
+  sec.leaders=val; admSelected=sec;
+  renderAdmLayers(); renderAdmCityBars();
+  if(viewMap){renderViewLayers();renderCitySummaries();}
+  showAdmForm(sec,admSelectedCity);
+  showToast(`${sec.name}: ${val} líderes salvo!`);
+  if(window._fbSaveSectors) window._fbSaveSectors();
+}
+
+function renderAdmCityBars(){
+  const max=Math.max(...Object.keys(CITIES).map(k=>cityTotal(k)));
+  document.getElementById('adm-city-bars').innerHTML=Object.entries(CITIES).map(([k,c])=>`
+    <div class="city-bar-row">
+      <span class="city-dot" style="background:${c.color}"></span>
+      <span style="font-size:11px;width:76px;color:#888">${c.name}</span>
+      <div class="city-bar-track"><div style="width:${Math.round(cityTotal(k)/max*100)}%;height:100%;background:${c.color};border-radius:2px"></div></div>
+      <span style="font-family:'Syne',sans-serif;font-size:11px;font-weight:700;width:28px;text-align:right;color:#ccc">${cityTotal(k)}</span>
+    </div>`).join('');
+}
+
+// ═══════════════════════════════════════════════════════════════
+// LÍDERES
+// ═══════════════════════════════════════════════════════════════
+let currentSectorId=null, editingLeaderId=null;
+
+function getAllSectors(){
+  const res=[];
+  Object.entries(CITIES).forEach(([ck,c])=>c.sectors.forEach(s=>res.push({...s,cityKey:ck,cityName:c.name,color:c.color})));
+  return res;
+}
+
+function renderLidSectorList(filter=''){
+  const all=getAllSectors();
+  const filtered=filter?all.filter(s=>s.name.toLowerCase().includes(filter.toLowerCase())||s.cityName.toLowerCase().includes(filter.toLowerCase())):all;
+  document.getElementById('lid-sector-list').innerHTML=filtered.map(s=>`
+    <div class="lid-sector-item ${currentSectorId===s.id?'active':''}" onclick="selectLidSector('${s.id}')">
+      <div>
+        <div class="lid-sector-name" style="color:${s.color}">${s.name}</div>
+        <div class="lid-sector-city">${s.cityName}</div>
+      </div>
+      <div class="lid-sector-count" style="color:${s.color}">${(LEADERS[s.id]||[]).length}</div>
+    </div>`).join('');
+}
+
+function filterLidSectors(v){ renderLidSectorList(v); }
+
+function selectLidSector(id){
+  currentSectorId=id;
+  renderLidSectorList(document.getElementById('lid-search').value);
+  const all=getAllSectors();
+  const s=all.find(x=>x.id===id);
+  if(!s) return;
+  const c=CITIES[s.cityKey];
+  document.getElementById('lid-main-title').textContent=s.name;
+  document.getElementById('lid-main-title').style.color=c.color;
+  document.getElementById('lid-main-subtitle').textContent=`${c.name} · ${(LEADERS[id]||[]).length} líderes cadastrados`;
+  document.getElementById('lid-add-btn').style.display='block';
+  renderLeaderCards(id);
+}
+
+function renderLeaderCards(id){
+  const lids=LEADERS[id]||[];
+  const all=getAllSectors(); const s=all.find(x=>x.id===id);
+  const c=s?CITIES[s.cityKey]:CITIES.taguatinga;
+  if(!lids.length){
+    document.getElementById('lid-table-wrap').innerHTML=`<div class="lid-empty">Nenhum líder cadastrado neste setor.<br>Clique em "+ Adicionar Líder" para começar.</div>`;
+    return;
+  }
+  document.getElementById('lid-table-wrap').innerHTML=lids.map(l=>`
+    <div class="lid-card">
+      <div class="lid-avatar" style="background:${c.color}22;border:1px solid ${c.color}44;color:${c.color}">${l.name[0]||'?'}</div>
+      <div class="lid-info">
+        <div class="lid-card-name">${l.name}</div>
+        <div class="lid-card-phone">${l.phone||'Sem telefone'}</div>
+      </div>
+      <div class="lid-card-actions">
+        <button class="lid-btn" onclick="editLeader('${id}','${l.id}')" title="Editar">✎</button>
+        <button class="lid-btn del" onclick="deleteLeader('${id}','${l.id}')" title="Excluir">✕</button>
+      </div>
+    </div>`).join('');
+  // update subtitle
+  if(document.getElementById('lid-main-subtitle'))
+    document.getElementById('lid-main-subtitle').textContent=`${CITIES[getAllSectors().find(x=>x.id===id)?.cityKey||'taguatinga'].name} · ${lids.length} líderes cadastrados`;
+}
+
+function openAddLeader(){
+  if(!currentSectorId) return;
+  editingLeaderId=null;
+  document.getElementById('leader-modal-title').textContent='Adicionar Líder';
+  document.getElementById('leader-name').value='';
+  document.getElementById('leader-phone').value='';
+  populateLeaderSectorSelect(currentSectorId);
+  document.getElementById('leader-modal').classList.add('open');
+  setTimeout(()=>document.getElementById('leader-name').focus(),100);
+}
+
+function editLeader(sectorId, leaderId){
+  const lid=(LEADERS[sectorId]||[]).find(l=>l.id===leaderId);
+  if(!lid) return;
+  editingLeaderId=leaderId;
+  currentSectorId=sectorId;
+  document.getElementById('leader-modal-title').textContent='Editar Líder';
+  document.getElementById('leader-name').value=lid.name;
+  document.getElementById('leader-phone').value=lid.phone||'';
+  populateLeaderSectorSelect(sectorId);
+  document.getElementById('leader-modal').classList.add('open');
+}
+
+function populateLeaderSectorSelect(selectedId){
+  const all=getAllSectors();
+  document.getElementById('leader-sector').innerHTML=all.map(s=>`<option value="${s.id}" ${s.id===selectedId?'selected':''}>${s.name} — ${s.cityName}</option>`).join('');
+}
+
+function closeLeaderModal(){ document.getElementById('leader-modal').classList.remove('open'); }
+
+function saveLeader(){
+  const name=document.getElementById('leader-name').value.trim();
+  const phone=document.getElementById('leader-phone').value.trim();
+  const sectorId=document.getElementById('leader-sector').value;
+  if(!name){ showToast('Informe o nome do líder',false); return; }
+  if(!LEADERS[sectorId]) LEADERS[sectorId]=[];
+  if(editingLeaderId){
+    const idx=LEADERS[sectorId].findIndex(l=>l.id===editingLeaderId);
+    if(idx>-1){ LEADERS[sectorId][idx].name=name; LEADERS[sectorId][idx].phone=phone; }
+  } else {
+    LEADERS[sectorId].push({id:'l_'+Date.now()+'_'+Math.random().toString(36).slice(2),name,phone});
+  }
+  closeLeaderModal();
+  currentSectorId=sectorId;
+  renderLidSectorList(document.getElementById('lid-search').value);
+  renderLeaderCards(sectorId);
+  if(viewMap){ renderViewLayers(); renderCitySummaries(); }
+  showToast(editingLeaderId?'Líder atualizado!':'Líder adicionado!');
+  if(window._fbSaveLeaders) window._fbSaveLeaders();
+}
+
+function deleteLeader(sectorId, leaderId){
+  if(!confirm('Remover este líder?')) return;
+  LEADERS[sectorId]=(LEADERS[sectorId]||[]).filter(l=>l.id!==leaderId);
+  renderLidSectorList(document.getElementById('lid-search').value);
+  renderLeaderCards(sectorId);
+  if(viewMap){ renderViewLayers(); renderCitySummaries(); }
+  showToast('Líder removido');
+  if(window._fbSaveLeaders) window._fbSaveLeaders();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PDF
+// ═══════════════════════════════════════════════════════════════
+let pdfOpt='all';
+function openPdfModal(){ document.getElementById('pdf-modal').classList.add('open'); }
+function closePdfModal(){ document.getElementById('pdf-modal').classList.remove('open'); }
+function selectPdfOpt(opt){
+  pdfOpt=opt;
+  ['all','summary','leaders'].forEach(o=>{
+    document.getElementById('pdf-opt-'+o).classList.toggle('sel',o===opt);
+  });
+}
+
+// ── GERAÇÃO DE IMAGEM DO MAPA ────────────────────────────────────
+// Toda a projeção usa Web Mercator (mesmo sistema dos tiles OSM)
+// para garantir alinhamento perfeito entre fundo e polígonos.
+
+// Mercator: lat → Y normalizado [0..1], de cima (norte) para baixo (sul)
+function latToMercY(lat) {
+  const latRad = lat * Math.PI / 180;
+  return (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2;
+}
+// Mercator: lng → X normalizado [0..1]
+function lngToMercX(lng) { return (lng + 180) / 360; }
+
+// Projeta lat/lng → pixel usando Mercator, dentro de um bounding box
+function latLngToPixel(lat, lng, bounds, W, H) {
+  const [bS, bW] = [bounds[0][0], bounds[0][1]];
+  const [bN, bE] = [bounds[1][0], bounds[1][1]];
+  const mx0 = lngToMercX(bW), mx1 = lngToMercX(bE);
+  const my0 = latToMercY(bN), my1 = latToMercY(bS); // my0 < my1 (norte menor)
+  const x = ((lngToMercX(lng) - mx0) / (mx1 - mx0)) * W;
+  const y = ((latToMercY(lat) - my0) / (my1 - my0)) * H;
+  return [x, y];
+}
+
+// Converte lat/lng → índice de tile OSM no zoom dado
+function latLngToTile(lat, lng, zoom) {
+  const n = Math.pow(2, zoom);
+  return {
+    x: Math.floor(lngToMercX(lng) * n),
+    y: Math.floor(latToMercY(lat) * n)
+  };
+}
+
+// Captura tiles OSM e devolve base64 da região recortada — projeção Mercator
+async function captureTilesAsBase64(bounds, W, H) {
+  try {
+    const [bS, bW] = bounds[0];
+    const [bN, bE] = bounds[1];
+    const latSpan = bN - bS;
+    const zoom = latSpan < 0.025 ? 14 : latSpan < 0.07 ? 13 : latSpan < 0.15 ? 12 : 11;
+    const TILE_SIZE = 256;
+    const totalTiles = Math.pow(2, zoom);
+
+    const tileNW = latLngToTile(bN, bW, zoom);
+    const tileSE = latLngToTile(bS, bE, zoom);
+
+    const txMin = tileNW.x, txMax = tileSE.x;
+    const tyMin = tileNW.y, tyMax = tileSE.y;
+
+    const gridW = (txMax - txMin + 1) * TILE_SIZE;
+    const gridH = (tyMax - tyMin + 1) * TILE_SIZE;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = gridW;
+    canvas.height = gridH;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#e8e4dc';
+    ctx.fillRect(0, 0, gridW, gridH);
+
+    const servers = ['a', 'b', 'c'];
+    await Promise.all(
+      Array.from({ length: tyMax - tyMin + 1 }, (_, dty) =>
+        Array.from({ length: txMax - txMin + 1 }, (_, dtx) => {
+          const tx = txMin + dtx, ty = tyMin + dty;
+          const srv = servers[(tx + ty) % 3];
+          return new Promise(resolve => {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => { ctx.drawImage(img, dtx * TILE_SIZE, dty * TILE_SIZE, TILE_SIZE, TILE_SIZE); resolve(); };
+            img.onerror = () => resolve();
+            img.src = `https://${srv}.tile.openstreetmap.org/${zoom}/${tx}/${ty}.png`;
+          });
+        })
+      ).flat()
+    );
+
+    // Crop: converte bounds para pixels dentro do grid de tiles, usando Mercator
+    const cropX = Math.round((lngToMercX(bW) * totalTiles - txMin) * TILE_SIZE);
+    const cropY = Math.round((latToMercY(bN) * totalTiles - tyMin) * TILE_SIZE);
+    const cropW = Math.round((lngToMercX(bE) - lngToMercX(bW)) * totalTiles * TILE_SIZE);
+    const cropH = Math.round((latToMercY(bS) - latToMercY(bN)) * totalTiles * TILE_SIZE);
+
+    const out = document.createElement('canvas');
+    out.width = W; out.height = H;
+    out.getContext('2d').drawImage(canvas, cropX, cropY, Math.max(cropW, 1), Math.max(cropH, 1), 0, 0, W, H);
+
+    return out.toDataURL('image/jpeg', 0.88);
+  } catch (e) { return null; }
+}
+
+function makeSVGMapImage(sectors, color, W, H, bounds, tileBase64) {
+  const polys = sectors.map(s => {
+    const lids = (LEADERS[s.id] || []).length;
+    const pct  = s.leaders > 0 ? lids / s.leaders : 0;
+    const alpha  = Math.round(25 + pct * 75).toString(16).padStart(2, '0');
+    const strokeA = Math.round(180 + pct * 75).toString(16).padStart(2, '0');
+
+    const pts = s.coords.map(([lat, lng]) => latLngToPixel(lat, lng, bounds, W, H).map(v => v.toFixed(1)).join(',')).join(' ');
+    const xs = s.coords.map(([lat, lng]) => latLngToPixel(lat, lng, bounds, W, H)[0]);
+    const ys = s.coords.map(([lat, lng]) => latLngToPixel(lat, lng, bounds, W, H)[1]);
+    const cx = xs.reduce((a, b) => a + b, 0) / xs.length;
+    const cy = ys.reduce((a, b) => a + b, 0) / ys.length;
+    const boxW = Math.max(...xs) - Math.min(...xs);
+    const boxH = Math.max(...ys) - Math.min(...ys);
+    const label = s.name.length > 7 ? s.name.slice(0, 6) + '.' : s.name;
+
+    return `<polygon points="${pts}" fill="${color}${alpha}" stroke="${color}${strokeA}" stroke-width="1.8" stroke-linejoin="round"/>
+      ${boxW > 18 && boxH > 12 ? `
+        <text x="${cx.toFixed(1)}" y="${(cy - 3).toFixed(1)}" text-anchor="middle" font-size="7.5" font-family="Arial" font-weight="800" fill="${color}" stroke="#fffd" stroke-width="3" paint-order="stroke">${label}</text>
+        <text x="${cx.toFixed(1)}" y="${(cy + 6).toFixed(1)}" text-anchor="middle" font-size="6.5" font-family="Arial" fill="#333" stroke="#fffd" stroke-width="2.5" paint-order="stroke">${lids}/${s.leaders}</text>` : ''}`;
+  }).join('');
+
+  const bg = tileBase64
+    ? `<image href="${tileBase64}" x="0" y="0" width="${W}" height="${H}" preserveAspectRatio="none"/>`
+    : `<rect width="${W}" height="${H}" fill="#dce4ec"/>`;
+
+  return `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">${bg}${polys}</svg>`;
+}
+
+// Captura tiles para todas as regiões antes de gerar o PDF
+// Retorna também os bounds exatos usados para cada região
+async function captureMapImages() {
+  const result = {};
+
+  // ── DF geral ──
+  // Calcula dfH proporcional à razão Mercator dos bounds
+  const dfBounds = [[-15.925, -48.165], [-15.770, -48.032]];
+  const dfW = 820;
+  const mercW = lngToMercX(dfBounds[1][1]) - lngToMercX(dfBounds[0][1]);
+  const mercH = latToMercY(dfBounds[0][0]) - latToMercY(dfBounds[1][0]);
+  const dfH = Math.round(dfW * (mercH / mercW));
+  result._df = await captureTilesAsBase64(dfBounds, dfW, dfH);
+  result._dfBounds = dfBounds;
+  result._dfW = dfW;
+  result._dfH = dfH;
+
+  // ── Por cidade — usa bounds idênticos ao generatePDF ──
+  for (const [ck, c] of Object.entries(CITIES)) {
+    const allCoords = c.sectors.flatMap(s => s.coords);
+    const minLat = Math.min(...allCoords.map(([la]) => la)) - 0.003;
+    const maxLat = Math.max(...allCoords.map(([la]) => la)) + 0.003;
+    const minLng = Math.min(...allCoords.map(([, lo]) => lo)) - 0.003;
+    const maxLng = Math.max(...allCoords.map(([, lo]) => lo)) + 0.003;
+    const bounds = [[minLat, minLng], [maxLat, maxLng]];
+
+    // Calcula W×H proporcional à razão Mercator dos bounds da cidade
+    const cMercW = lngToMercX(maxLng) - lngToMercX(minLng);
+    const cMercH = latToMercY(minLat) - latToMercY(maxLat);
+    const mapW = 320;
+    const mapH = Math.round(mapW * (cMercH / cMercW));
+
+    result[ck] = await captureTilesAsBase64(bounds, mapW, mapH);
+    result[`${ck}_bounds`] = bounds;
+    result[`${ck}_W`] = mapW;
+    result[`${ck}_H`] = mapH;
+  }
+
+  return result;
+}
+
+async function startGeneratePDF() {
+  const btn = document.getElementById('pdf-gen-btn');
+  btn.disabled = true;
+  btn.textContent = '🗺️ Capturando mapas...';
+
+  let mapImages = {};
+  try {
+    mapImages = await captureMapImages();
+  } catch(e) {
+    // fallback sem mapas
+  }
+
+  btn.textContent = '📄 Gerando PDF...';
+  await new Promise(r => setTimeout(r, 60));
+  generatePDF(mapImages);
+  btn.disabled = false;
+  btn.textContent = 'Gerar e baixar PDF';
+}
+
+function makeSVGBarChart(sectors, color, width=560, height=160){
+  const maxVal = Math.max(...sectors.map(s=>s.leaders), 1);
+  const barW = Math.max(8, Math.floor((width - 40) / sectors.length) - 3);
+  const chartH = height - 38;
+  const bars = sectors.map((s, i) => {
+    const bh = Math.round((s.leaders / maxVal) * chartH);
+    const x = 20 + i * ((width - 40) / sectors.length) + ((width-40)/sectors.length - barW)/2;
+    const lc = (LEADERS[s.id]||[]).length;
+    const fillH = lc>0 ? Math.round((lc / maxVal) * chartH) : 0;
+    const shortName = s.name.length>6 ? s.name.slice(0,5)+'…' : s.name;
+    return `
+      <rect x="${x}" y="4" width="${barW}" height="${chartH}" rx="3" fill="${color}18"/>
+      <rect x="${x}" y="${4 + chartH - bh}" width="${barW}" height="${bh}" rx="3" fill="${color}55"/>
+      ${fillH>0?`<rect x="${x}" y="${4 + chartH - fillH}" width="${barW}" height="${fillH}" rx="3" fill="${color}"/>`:``}
+      <text x="${x + barW/2}" y="${chartH + 17}" text-anchor="middle" font-size="7" fill="#888" font-family="Arial">${shortName}</text>
+      <text x="${x + barW/2}" y="${4 + chartH - bh - 3}" text-anchor="middle" font-size="7.5" fill="${color}" font-family="Arial" font-weight="700">${lc}</text>
+    `;
+  }).join('');
+  // overflow:hidden para não vazar fora do SVG
+  return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" style="overflow:hidden;display:block">${bars}</svg>`;
+}
+
+// ── TREEMAP DOS SETORES — algoritmo slice-and-dice robusto ──────
+function makeSVGTreemap(sectors, color, width, height, mapImageDataUrl) {
+  if (!sectors || sectors.length === 0) return '';
+
+  const GAP = 3;
+  const LEGEND_H = 18;
+  const drawH = height - LEGEND_H;
+
+  // Ordena do maior para o menor
+  const items = [...sectors]
+    .sort((a, b) => b.leaders - a.leaders);
+  const total = items.reduce((s, sec) => s + Math.max(sec.leaders, 1), 0);
+
+  const rects = [];
+
+  // Squarified treemap recursivo
+  function squarify(nodes, x, y, w, h) {
+    if (!nodes.length) return;
+    if (nodes.length === 1) {
+      rects.push({ node: nodes[0], x, y, w: Math.max(w - GAP, 1), h: Math.max(h - GAP, 1) });
+      return;
+    }
+
+    const nodeTotal = nodes.reduce((s, n) => s + Math.max(n.leaders, 1), 0);
+
+    // Tenta encaixar em uma linha/coluna
+    // Divide ao meio (bisection) para minimizar aspect ratio
+    let bestSplit = 1;
+    let bestAR = Infinity;
+    for (let i = 1; i < nodes.length; i++) {
+      const g1 = nodes.slice(0, i);
+      const g2 = nodes.slice(i);
+      const frac = g1.reduce((s, n) => s + Math.max(n.leaders, 1), 0) / nodeTotal;
+      let ar;
+      if (w >= h) {
+        const w1 = w * frac;
+        const barH = h / g1.length;
+        ar = g1.map(n => {
+          const bh = (Math.max(n.leaders,1)/g1.reduce((s,x)=>s+Math.max(x.leaders,1),0)) * h;
+          return Math.max(w1/bh, bh/w1);
+        }).reduce((a,b)=>a+b,0) / g1.length;
+      } else {
+        const h1 = h * frac;
+        const barW = w / g1.length;
+        ar = g1.map(n => {
+          const bw = (Math.max(n.leaders,1)/g1.reduce((s,x)=>s+Math.max(x.leaders,1),0)) * w;
+          return Math.max(h1/bw, bw/h1);
+        }).reduce((a,b)=>a+b,0) / g1.length;
+      }
+      if (ar < bestAR) { bestAR = ar; bestSplit = i; }
+    }
+
+    const g1 = nodes.slice(0, bestSplit);
+    const g2 = nodes.slice(bestSplit);
+    const frac = g1.reduce((s, n) => s + Math.max(n.leaders, 1), 0) / nodeTotal;
+    const g1total = g1.reduce((s, n) => s + Math.max(n.leaders, 1), 0);
+
+    if (w >= h) {
+      const w1 = Math.round(w * frac);
+      // Distribui g1 verticalmente em w1
+      let cy = y;
+      g1.forEach(n => {
+        const nh = Math.round(h * Math.max(n.leaders, 1) / g1total);
+        rects.push({ node: n, x, y: cy, w: Math.max(w1 - GAP, 1), h: Math.max(nh - GAP, 1) });
+        cy += nh;
+      });
+      squarify(g2, x + w1, y, w - w1, h);
+    } else {
+      const h1 = Math.round(h * frac);
+      // Distribui g1 horizontalmente em h1
+      let cx = x;
+      g1.forEach(n => {
+        const nw = Math.round(w * Math.max(n.leaders, 1) / g1total);
+        rects.push({ node: n, x: cx, y, w: Math.max(nw - GAP, 1), h: Math.max(h1 - GAP, 1) });
+        cx += nw;
+      });
+      squarify(g2, x, y + h1, w, h - h1);
+    }
+  }
+
+  squarify(items, GAP, GAP, width - GAP * 2, drawH - GAP * 2);
+
+  const cells = rects.map(({ node: s, x, y, w, h }) => {
+    const lids = (LEADERS[s.id] || []).length;
+    const pct  = s.leaders > 0 ? lids / s.leaders : 0;
+    const fillAlpha = mapImageDataUrl
+      ? Math.round(55 + pct * 160).toString(16).padStart(2, '0')
+      : Math.round(35 + pct * 200).toString(16).padStart(2, '0');
+    const strokeAlpha = Math.round(120 + pct * 135).toString(16).padStart(2, '0');
+
+    const showName  = w > 30 && h > 18;
+    const showScore = w > 30 && h > 32;
+    const fs = Math.min(10, Math.max(6.5, w / 5.5));
+    const label = s.name.length > 8 ? s.name.slice(0,7)+'.' : s.name;
+
+    return `
+      <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="3"
+        fill="${color}${fillAlpha}" stroke="${color}${strokeAlpha}" stroke-width="1.5"/>
+      ${showName  ? `<text x="${x+w/2}" y="${y+h/2+(showScore?-5:4)}" text-anchor="middle" dominant-baseline="middle" font-size="${fs}" font-family="Arial" font-weight="700" fill="#fff" stroke="#0006" stroke-width="2" paint-order="stroke">${label}</text>` : ''}
+      ${showScore ? `<text x="${x+w/2}" y="${y+h/2+6}" text-anchor="middle" dominant-baseline="middle" font-size="${Math.max(6,fs-1.5)}" font-family="Arial" fill="#fff" stroke="#0005" stroke-width="2" paint-order="stroke">${lids}/${s.leaders}</text>` : ''}
+    `;
+  }).join('');
+
+  // Legenda
+  const ly = drawH + 2;
+  const legend = `
+    <rect x="0" y="${drawH}" width="${width}" height="${LEGEND_H}" fill="rgba(255,255,255,0.82)" rx="0"/>
+    <rect x="4"  y="${ly}" width="10" height="10" rx="2" fill="${color}35" stroke="${color}88" stroke-width="1"/>
+    <text x="17" y="${ly+8}" font-size="8" fill="#555" font-family="Arial">sem líderes</text>
+    <rect x="80" y="${ly}" width="10" height="10" rx="2" fill="${color}" stroke="${color}" stroke-width="1"/>
+    <text x="93" y="${ly+8}" font-size="8" fill="#555" font-family="Arial">com líderes</text>
+  `;
+
+  return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" style="display:block;overflow:hidden">
+    <rect width="${width}" height="${height}" rx="8" fill="#f0f4f8"/>
+    ${mapImageDataUrl ? `<image href="${mapImageDataUrl}" x="0" y="0" width="${width}" height="${height}" preserveAspectRatio="xMidYMid slice" style="border-radius:8px"/>
+    <rect width="${width}" height="${height}" rx="8" fill="rgba(240,244,248,0.18)"/>` : ''}
+    ${cells}${legend}
+  </svg>`;
+}
+
+function makeSVGCityCompare(cities, width=560, height=120){
+  const entries = Object.entries(cities);
+  const maxVal = Math.max(...entries.map(([k])=>cityTotal(k)), 1);
+  const barW = Math.floor((width - 60) / entries.length) - 12;
+  const chartH = height - 40;
+  const bars = entries.map(([k,c], i)=>{
+    const total = cityTotal(k);
+    const lids = Object.keys(LEADERS).filter(id=>c.sectors.find(s=>s.id===id)).reduce((s,id)=>s+(LEADERS[id]||[]).length,0);
+    const bh = Math.round((total/maxVal)*chartH);
+    const lh = lids>0?Math.round((lids/maxVal)*chartH):0;
+    const x = 30 + i*((width-60)/entries.length) + ((width-60)/entries.length - barW)/2;
+    return `
+      <rect x="${x}" y="${4}" width="${barW}" height="${chartH}" rx="4" fill="${c.color}15"/>
+      <rect x="${x}" y="${4+chartH-bh}" width="${barW}" height="${bh}" rx="4" fill="${c.color}40"/>
+      ${lh>0?`<rect x="${x}" y="${4+chartH-lh}" width="${barW}" height="${lh}" rx="4" fill="${c.color}"/>`:``}
+      <text x="${x+barW/2}" y="${chartH+18}" text-anchor="middle" font-size="10" fill="#333" font-family="Arial" font-weight="700">${c.name}</text>
+      <text x="${x+barW/2}" y="${chartH+30}" text-anchor="middle" font-size="9" fill="#999" font-family="Arial">${total} meta · ${lids} cad.</text>
+      <text x="${x+barW/2}" y="${4+chartH-bh-5}" text-anchor="middle" font-size="10" fill="${c.color}" font-family="Arial" font-weight="800">${total}</text>
+    `;
+  }).join('');
+  return `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">${bars}</svg>`;
+}
+
+// ── MAPA SVG DOS SETORES (sem internet, 100% inline) ──────────
+function makeSVGSectorMap(sectors, color, width, height) {
+  if (!sectors || sectors.length === 0) return '';
+
+  // Calcular bounding box de todas as coordenadas
+  let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+  sectors.forEach(s => {
+    s.coords.forEach(([lat, lng]) => {
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+      if (lng < minLng) minLng = lng;
+      if (lng > maxLng) maxLng = lng;
+    });
+  });
+
+  const pad = 12;
+  const W = width - pad * 2;
+  const H = height - pad * 2;
+  const latRange = maxLat - minLat || 0.01;
+  const lngRange = maxLng - minLng || 0.01;
+
+  function proj(lat, lng) {
+    const x = pad + ((lng - minLng) / lngRange) * W;
+    const y = pad + ((maxLat - lat) / latRange) * H;
+    return [x, y];
+  }
+
+  const maxLiders = Math.max(...sectors.map(s => (LEADERS[s.id]||[]).length), 1);
+
+  const polys = sectors.map(s => {
+    const lids = (LEADERS[s.id]||[]).length;
+    const intensity = lids / maxLiders;
+    const alpha = Math.round(30 + intensity * 200).toString(16).padStart(2,'0');
+    const strokeAlpha = Math.round(120 + intensity * 135).toString(16).padStart(2,'0');
+
+    const points = s.coords.map(([lat,lng]) => proj(lat,lng).join(',')).join(' ');
+
+    const xs = s.coords.map(([,lng]) => proj(0,lng)[0]);
+    const ys = s.coords.map(([lat]) => proj(lat,0)[1]);
+    const cx = xs.reduce((a,b)=>a+b,0)/xs.length;
+    const cy = ys.reduce((a,b)=>a+b,0)/ys.length;
+
+    const shortName = s.name.length > 7 ? s.name.slice(0,6)+'.' : s.name;
+
+    return `
+      <polygon points="${points}" fill="${color}${alpha}" stroke="${color}${strokeAlpha}" stroke-width="1.2"/>
+      <text x="${cx}" y="${cy - 2}" text-anchor="middle" font-size="6.5" font-family="Arial" font-weight="700" fill="${color}">${shortName}</text>
+      <text x="${cx}" y="${cy + 7}" text-anchor="middle" font-size="6" font-family="Arial" fill="#333">${lids}/${s.leaders}</text>
+    `;
+  }).join('');
+
+  const bg = `<rect width="${width}" height="${height}" rx="8" fill="#eef2f8"/>
+    <rect x="1" y="1" width="${width-2}" height="${height-2}" rx="7" fill="none" stroke="#c8d4e8" stroke-width="1"/>`;
+
+  return `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg" style="display:block">${bg}${polys}</svg>`;
+}
+
+function generatePDF(mapImages){
+  mapImages = mapImages || {};
+  const totalGeral=Object.keys(CITIES).reduce((s,k)=>s+cityTotal(k),0);
+  const totalLideres=Object.values(LEADERS).reduce((s,arr)=>s+arr.length,0);
+  const totalSetores=Object.keys(CITIES).reduce((s,k)=>s+CITIES[k].sectors.length,0);
+  const now=new Date();
+  const dt=`${now.toLocaleDateString('pt-BR')} às ${now.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}`;
+
+  let body='';
+
+  if(pdfOpt==='all'||pdfOpt==='summary'){
+
+    // ── CAPA / HEADER ──────────────────────────────────────────
+    body+=`
+    <div style="background:linear-gradient(135deg,#0e1220 0%,#111827 60%,#0a1628 100%);border-radius:16px;padding:36px 40px 32px;margin-bottom:28px;position:relative;overflow:hidden">
+      <div style="position:absolute;top:0;right:0;width:200px;height:200px;background:radial-gradient(circle,#4e9af120,transparent 70%);pointer-events:none"></div>
+      <div style="position:absolute;bottom:0;left:100px;width:150px;height:150px;background:radial-gradient(circle,#3ab07e15,transparent 70%);pointer-events:none"></div>
+      <div style="display:flex;align-items:flex-start;justify-content:space-between">
+        <div>
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+            <div style="width:10px;height:10px;border-radius:50%;background:#4e9af1;box-shadow:0 0 12px #4e9af1"></div>
+            <div style="font-size:10px;color:#4e9af1;font-weight:700;letter-spacing:.15em;text-transform:uppercase">Relatório Estratégico</div>
+          </div>
+          <div style="font-size:32px;font-weight:900;color:#ffffff;letter-spacing:-0.02em;line-height:1.1;margin-bottom:8px">Mapa de Líderes<br><span style="color:#4e9af1">Distrito Federal</span></div>
+          <div style="font-size:11px;color:#4a5568;margin-top:10px;letter-spacing:.05em">Taguatinga · Ceilândia · Samambaia</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:9px;color:#4a5568;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Gerado em</div>
+          <div style="font-size:11px;color:#718096;font-weight:600">${dt}</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:20px;margin-top:28px">
+        <div style="flex:1;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px 20px">
+          <div style="font-size:38px;font-weight:900;color:#ffffff;line-height:1">${totalGeral}</div>
+          <div style="font-size:9px;color:#718096;text-transform:uppercase;letter-spacing:.1em;margin-top:4px">Meta total</div>
+          <div style="width:32px;height:2px;background:linear-gradient(90deg,#4e9af1,#3ab07e);border-radius:2px;margin-top:8px"></div>
+        </div>
+        <div style="flex:1;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px 20px">
+          <div style="font-size:38px;font-weight:900;color:#3ab07e;line-height:1">${totalLideres}</div>
+          <div style="font-size:9px;color:#718096;text-transform:uppercase;letter-spacing:.1em;margin-top:4px">Cadastrados</div>
+          <div style="width:32px;height:2px;background:#3ab07e;border-radius:2px;margin-top:8px"></div>
+        </div>
+        <div style="flex:1;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px 20px">
+          <div style="font-size:38px;font-weight:900;color:#e06030;line-height:1">${totalSetores}</div>
+          <div style="font-size:9px;color:#718096;text-transform:uppercase;letter-spacing:.1em;margin-top:4px">Setores</div>
+          <div style="width:32px;height:2px;background:#e06030;border-radius:2px;margin-top:8px"></div>
+        </div>
+      </div>
+    </div>`;
+
+    // ── MAPA DE COBERTURA DF ───────────────────────────────────
+    // Usa bounds e dimensões calculados proporcionalmente pelo captureMapImages
+    const dfBounds = mapImages._dfBounds || [[-15.925, -48.165], [-15.770, -48.032]];
+    const dfW = mapImages._dfW || 820;
+    const dfH = mapImages._dfH || 380;
+    // SVG com todos os setores — tile embutido, alfa baixo para mapa aparecer
+    const dfTileB64 = mapImages._df || null;
+    const allSectorsSVG = Object.entries(CITIES).map(([ck,c]) =>
+      c.sectors.map(s => {
+        const lids = (LEADERS[s.id]||[]).length;
+        const pct  = s.leaders > 0 ? lids/s.leaders : 0;
+        const alpha = Math.round(25 + pct*70).toString(16).padStart(2,'0');
+        const sa    = Math.round(180 + pct*75).toString(16).padStart(2,'0');
+        const pts = s.coords.map(([lat,lng]) => {
+          const [x,y] = latLngToPixel(lat,lng,dfBounds,dfW,dfH);
+          return `${x.toFixed(1)},${y.toFixed(1)}`;
+        }).join(' ');
+        const xs = s.coords.map(([lat,lng]) => latLngToPixel(lat,lng,dfBounds,dfW,dfH)[0]);
+        const ys = s.coords.map(([lat,lng]) => latLngToPixel(lat,lng,dfBounds,dfW,dfH)[1]);
+        const cx = xs.reduce((a,b)=>a+b)/xs.length;
+        const cy = ys.reduce((a,b)=>a+b)/ys.length;
+        const bw = Math.max(...xs)-Math.min(...xs);
+        const bh = Math.max(...ys)-Math.min(...ys);
+        const label = s.name.length>6 ? s.name.slice(0,5)+'.' : s.name;
+        return `<polygon points="${pts}" fill="${c.color}${alpha}" stroke="${c.color}${sa}" stroke-width="1.2" stroke-linejoin="round"/>
+          ${bw>14&&bh>9?`<text x="${cx.toFixed(1)}" y="${(cy+3).toFixed(1)}" text-anchor="middle" font-size="6" font-family="Arial" font-weight="700" fill="${c.color}" stroke="#fffd" stroke-width="2.5" paint-order="stroke">${label}</text>`:''}`;
+      }).join('')
+    ).join('');
+
+    const dfBg = dfTileB64
+      ? `<image href="${dfTileB64}" x="0" y="0" width="${dfW}" height="${dfH}" preserveAspectRatio="none"/>`
+      : `<rect width="${dfW}" height="${dfH}" fill="#dce4ec"/>`;
+
+    body+=`
+    <div style="margin-bottom:28px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+        <div style="width:3px;height:18px;background:linear-gradient(180deg,#4e9af1,#3ab07e);border-radius:2px"></div>
+        <div style="font-size:13px;font-weight:800;color:#0e0e14;letter-spacing:-.01em">Mapa de Cobertura — DF</div>
+      </div>
+      <div style="border-radius:12px;overflow:hidden;border:2px solid #e8eaf0;position:relative">
+        <svg width="${dfW}" height="${dfH}" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" style="display:block">${dfBg}${allSectorsSVG}</svg>
+        <div style="position:absolute;bottom:8px;right:10px;display:flex;gap:6px">
+          <span style="background:#4e9af1;color:#fff;font-size:8px;font-weight:700;padding:3px 8px;border-radius:20px">Taguatinga</span>
+          <span style="background:#e06030;color:#fff;font-size:8px;font-weight:700;padding:3px 8px;border-radius:20px">Ceilândia</span>
+          <span style="background:#3ab07e;color:#fff;font-size:8px;font-weight:700;padding:3px 8px;border-radius:20px">Samambaia</span>
+        </div>
+      </div>
+    </div>`;
+
+    // ── GRÁFICO COMPARATIVO POR CIDADE ─────────────────────────
+    body+=`
+    <div style="margin-bottom:28px;background:#f8f9fb;border-radius:12px;padding:20px 24px;border:1px solid #e8eaf0">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+        <div style="width:3px;height:18px;background:linear-gradient(180deg,#4e9af1,#3ab07e);border-radius:2px"></div>
+        <div style="font-size:13px;font-weight:800;color:#0e0e14">Comparativo por Cidade</div>
+        <div style="margin-left:auto;display:flex;gap:14px;font-size:9px;color:#888">
+          <span style="display:flex;align-items:center;gap:4px"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#4e9af155"></span>Meta</span>
+          <span style="display:flex;align-items:center;gap:4px"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#4e9af1"></span>Cadastrados</span>
+        </div>
+      </div>
+      ${makeSVGCityCompare(CITIES, 560, 120)}
+    </div>`;
+
+    // ── CARDS POR CIDADE: mapa real (esq) + gráfico dividido (dir) ──
+    Object.entries(CITIES).forEach(([ck,c])=>{
+      const lidsCidade = Object.keys(LEADERS).filter(id=>c.sectors.find(s=>s.id===id)).reduce((s,id)=>s+(LEADERS[id]||[]).length,0);
+      const pctGeral   = cityTotal(ck)>0 ? Math.round(lidsCidade/cityTotal(ck)*100) : 0;
+
+      // Bounds da cidade — usa os mesmos calculados em captureMapImages
+      const allCoords = c.sectors.flatMap(s=>s.coords);
+      const minLat = Math.min(...allCoords.map(([la])=>la)) - 0.003;
+      const maxLat = Math.max(...allCoords.map(([la])=>la)) + 0.003;
+      const minLng = Math.min(...allCoords.map(([,lo])=>lo)) - 0.003;
+      const maxLng = Math.max(...allCoords.map(([,lo])=>lo)) + 0.003;
+      const cityBounds = mapImages[`${ck}_bounds`] || [[minLat, minLng],[maxLat, maxLng]];
+      const mapW = mapImages[`${ck}_W`] || 320;
+      const mapH = mapImages[`${ck}_H`] || 340;
+
+      // SVG dos polígonos alinhado com o bounds da cidade — usa tile base64 capturado
+      const cityTileB64 = mapImages[ck] || null;
+      const citySVG = makeSVGMapImage(c.sectors, c.color, mapW, mapH, cityBounds, cityTileB64);
+
+      // Divide os setores em 2 metades para o gráfico
+      const half = Math.ceil(c.sectors.length / 2);
+      const secs1 = c.sectors.slice(0, half);
+      const secs2 = c.sectors.slice(half);
+      const barW = 510, barH = 170;
+      const svgBar1 = makeSVGBarChart(secs1, c.color, barW, barH);
+      const svgBar2 = secs2.length ? makeSVGBarChart(secs2, c.color, barW, barH) : '';
+
+      body+=`
+      <div style="margin-bottom:28px;page-break-inside:avoid;border:1px solid #dde2ec;border-radius:14px;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,0.07)">
+
+        <!-- Cabeçalho -->
+        <div style="background:linear-gradient(90deg,${c.color}22,${c.color}08);border-bottom:3px solid ${c.color};padding:12px 20px;display:flex;align-items:center;gap:12px">
+          <div style="width:5px;height:40px;background:${c.color};border-radius:3px;flex-shrink:0"></div>
+          <div style="flex:1">
+            <div style="font-size:22px;font-weight:900;color:#0e0e14;letter-spacing:-0.02em">${c.name}</div>
+            <div style="font-size:10px;color:#777;margin-top:2px">${cityTotal(ck)} meta · ${lidsCidade} cadastrados · ${c.sectors.length} setores</div>
+          </div>
+          <div style="display:flex;gap:10px;align-items:center">
+            <div style="text-align:center;background:${c.color}15;border:1px solid ${c.color}40;border-radius:10px;padding:8px 16px">
+              <div style="font-size:26px;font-weight:900;color:${c.color};line-height:1">${lidsCidade}</div>
+              <div style="font-size:7px;color:#999;text-transform:uppercase;letter-spacing:.06em;margin-top:2px">cadastrados</div>
+            </div>
+            <div style="text-align:center;background:#f4f6fa;border:1px solid #dde2ec;border-radius:10px;padding:8px 16px">
+              <div style="font-size:26px;font-weight:900;color:#444;line-height:1">${cityTotal(ck)}</div>
+              <div style="font-size:7px;color:#999;text-transform:uppercase;letter-spacing:.06em;margin-top:2px">meta</div>
+            </div>
+            <div style="text-align:center;padding:0 8px">
+              <div style="font-size:34px;font-weight:900;color:${c.color};line-height:1">${pctGeral}%</div>
+              <div style="font-size:7px;color:#aaa;text-transform:uppercase;letter-spacing:.06em">preench.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Barra de progresso -->
+        <div style="padding:6px 20px 0;background:#fff">
+          <div style="height:5px;background:#e8eaf0;border-radius:4px;overflow:hidden">
+            <div style="width:${Math.min(pctGeral,100)}%;height:100%;background:linear-gradient(90deg,${c.color}88,${c.color});border-radius:4px"></div>
+          </div>
+        </div>
+
+        <!-- Corpo: treemap ESQ + gráficos DIR -->
+        <div style="display:flex;align-items:stretch;gap:16px;background:#fff;padding:14px 16px 14px">
+
+          <!-- MAPA REAL COM POLÍGONOS -->
+          <div style="flex-shrink:0;width:${mapW}px">
+            <div style="font-size:8px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px">Mapa dos Setores</div>
+            <div style="width:${mapW}px;height:${mapH}px;border-radius:8px;overflow:hidden;border:1px solid #dde2ec">
+              ${citySVG}
+            </div>
+          </div>
+
+          <!-- GRÁFICOS lado direito, empilhados -->
+          <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:10px">
+            <div style="font-size:8px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:.1em;margin-bottom:2px">Líderes por Setor</div>
+
+            <div style="background:#f8f9fb;border-radius:10px;padding:10px 8px 6px;border:1px solid #e8eaf0">
+              <div style="font-size:7px;color:#bbb;margin-bottom:4px;font-family:Arial">Setores 1–${half}</div>
+              ${svgBar1}
+            </div>
+
+            ${secs2.length ? `
+            <div style="background:#f8f9fb;border-radius:10px;padding:10px 8px 6px;border:1px solid #e8eaf0">
+              <div style="font-size:7px;color:#bbb;margin-bottom:4px;font-family:Arial">Setores ${half+1}–${c.sectors.length}</div>
+              ${svgBar2}
+            </div>` : ''}
+
+            <div style="display:flex;gap:12px;font-size:8px;color:#aaa;padding:0 4px">
+              <span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${c.color}55;vertical-align:middle;margin-right:3px"></span>Meta</span>
+              <span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${c.color};vertical-align:middle;margin-right:3px"></span>Cadastrados</span>
+            </div>
+          </div>
+
+        </div>
+      </div>`;
+    });
+  }
+
+  // ── ZONAS ELEITORAIS ──────────────────────────────────────────
+  if(pdfOpt==='all'){
+    const zonasByCidade = {};
+    ZONAS.forEach(z=>{ if(!zonasByCidade[z.cidade]) zonasByCidade[z.cidade]=[]; zonasByCidade[z.cidade].push(z); });
+    const cidadeColors = {'Taguatinga':'#4e9af1','Ceilândia':'#e06030','Samambaia':'#3ab07e'};
+
+    body+=`
+    <div style="margin-top:24px;page-break-before:always">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px">
+        <div style="width:3px;height:18px;background:linear-gradient(180deg,#4e9af1,#3ab07e);border-radius:2px"></div>
+        <div style="font-size:13px;font-weight:800;color:#0e0e14">Zonas Eleitorais & Escolas</div>
+      </div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap">
+        ${Object.entries(zonasByCidade).map(([cidade, zonas])=>`
+        <div style="flex:1;min-width:160px;background:#f8f9fb;border-radius:12px;padding:16px;border:1px solid #e8eaf0;border-top:3px solid ${cidadeColors[cidade]||'#888'}">
+          <div style="font-size:11px;font-weight:800;color:${cidadeColors[cidade]||'#333'};margin-bottom:12px;text-transform:uppercase;letter-spacing:.05em">${cidade}</div>
+          ${zonas.map(z=>`
+          <div style="margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #eee">
+            <div style="font-size:10px;font-weight:700;color:${z.color};margin-bottom:2px">${z.zona}</div>
+            <div style="font-size:9px;color:#555;line-height:1.5">${z.endereco}</div>
+            <div style="font-size:8px;color:#999;margin-top:2px;font-style:italic">${z.abrangencia}</div>
+          </div>`).join('')}
+        </div>`).join('')}
+      </div>
+    </div>`;
+  }
+
+  // ── LISTA DE LÍDERES ─────────────────────────────────────────
+  if(pdfOpt==='all'||pdfOpt==='leaders'){
+    if(totalLideres>0){
+      body+=`
+      <div style="margin-top:28px;${pdfOpt==='leaders'?'':'page-break-before:always'}">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px">
+          <div style="width:3px;height:18px;background:linear-gradient(180deg,#4e9af1,#3ab07e);border-radius:2px"></div>
+          <div style="font-size:13px;font-weight:800;color:#0e0e14">Líderes Cadastrados por Setor</div>
+          <div style="margin-left:auto;background:#0e0e14;color:#fff;font-size:9px;font-weight:700;padding:4px 10px;border-radius:20px">${totalLideres} total</div>
+        </div>`;
+      Object.entries(CITIES).forEach(([ck,c])=>{
+        const setsComLid=c.sectors.filter(s=>(LEADERS[s.id]||[]).length>0);
+        if(!setsComLid.length) return;
+        body+=`
+        <div style="margin-bottom:20px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:8px 12px;background:${c.color}12;border-left:3px solid ${c.color};border-radius:0 8px 8px 0">
+            <div style="font-size:12px;font-weight:800;color:${c.color}">${c.name}</div>
+            <div style="font-size:10px;color:${c.color}99">${setsComLid.reduce((s,sec)=>s+(LEADERS[sec.id]||[]).length,0)} líderes</div>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px">
+            ${setsComLid.map(s=>{
+              const lids=LEADERS[s.id]||[];
+              return `<div style="flex:1;min-width:200px;background:#f8f9fb;border-radius:10px;padding:12px;border:1px solid #e8eaf0">
+                <div style="font-size:10px;font-weight:700;color:#333;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between">
+                  <span>${s.name}</span>
+                  <span style="background:${c.color};color:#fff;font-size:8px;padding:2px 7px;border-radius:10px">${lids.length}</span>
+                </div>
+                ${lids.map(l=>`<div style="display:flex;align-items:center;gap:7px;padding:4px 0;border-bottom:1px solid #f0f0f0">
+                  <div style="width:22px;height:22px;border-radius:50%;background:${c.color};color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${l.name[0]||'?'}</div>
+                  <div><div style="font-size:10px;font-weight:600;color:#222">${l.name}</div><div style="font-size:9px;color:#888">${l.phone||'—'}</div></div>
+                </div>`).join('')}
+              </div>`;
+            }).join('')}
+          </div>
+        </div>`;
+      });
+      body+=`</div>`;
+    }
+  }
+
+  // ── RODAPÉ ───────────────────────────────────────────────────
+  body+=`
+  <div style="margin-top:40px;padding-top:20px;border-top:1px solid #e8eaf0;display:flex;justify-content:space-between;align-items:center">
+    <div style="font-size:9px;color:#bbb">Mapa de Líderes — DF · ${dt}</div>
+    <div style="display:flex;gap:8px">
+      <span style="width:8px;height:8px;border-radius:50%;background:#4e9af1;display:inline-block"></span>
+      <span style="width:8px;height:8px;border-radius:50%;background:#e06030;display:inline-block"></span>
+      <span style="width:8px;height:8px;border-radius:50%;background:#3ab07e;display:inline-block"></span>
+    </div>
+  </div>`;
+
+  // ── ABRIR JANELA ─────────────────────────────────────────────
+  const win=window.open('','_blank');
+  win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Relatório — Mapa de Líderes DF</title>
+    <style>
+      *{box-sizing:border-box;margin:0;padding:0}
+      body{font-family:'Helvetica Neue',Arial,sans-serif;color:#222;background:#fff;padding:24px 28px;max-width:900px;margin:0 auto;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      @media print{body{padding:12px 16px}@page{margin:0.8cm;size:A4 landscape}}
+      img{max-width:100%}
+    </style></head><body>${body}</body></html>`);
+  win.document.close();
+  win.onload=()=>{ win.print(); };
+  closePdfModal();
+  showToast('PDF pronto para impressão/download!');
+}
+
+// ═══════════════════════════════════════════════════════════════
+// TROCA DE ABAS
+// ═══════════════════════════════════════════════════════════════
+function switchTab(t){
+  document.querySelectorAll('.tab').forEach((b,i)=>b.classList.toggle('on',(t==='view'&&i===0)||(t==='lideres'&&i===1)||(t==='admin'&&i===2)));
+  document.getElementById('view-wrap').style.display=t==='view'?'flex':'none';
+  document.getElementById('lideres-wrap').style.display=t==='lideres'?'flex':'none';
+  document.getElementById('admin-wrap').style.display=t==='admin'?'flex':'none';
+  if(t==='view'&&viewMap) setTimeout(()=>viewMap.invalidateSize(),100);
+  if(t==='admin'){ initAdmMap(); setTimeout(()=>admMap.invalidateSize(),100); }
+  if(t==='lideres'){ renderLidSectorList(); }
+}
+
+// ── EXPÕE AO ESCOPO GLOBAL (usado pelo módulo Firebase) ──────────
+window.LEADERS = LEADERS;
+window.CITIES  = CITIES;
+window.viewMap = null;
+window.admMap  = null;
+window.currentSectorId    = null;
+window.renderViewLayers   = renderViewLayers;
+window.renderCitySummaries= renderCitySummaries;
+window.renderAdmLayers    = renderAdmLayers;
+window.renderAdmCityBars  = renderAdmCityBars;
+window.renderLidSectorList= renderLidSectorList;
+window.renderLeaderCards  = renderLeaderCards;
+window._fbInitialized     = false;
+
+// INIT
+initViewMap();
+
+</script>
+</body>
+</html>
